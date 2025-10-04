@@ -1,38 +1,30 @@
-"""Utilities for maintaining the ChatGPT micro-cap portfolio.
+"""EUR-adapted trading script for ChatGPT micro-cap portfolio (Trade Republic Germany).
 
-This module rewrites the original script to:
-- Centralize market data fetching with a robust Yahoo->Stooq fallback
-- Ensure ALL price requests go through the same accessor
-- Handle empty Yahoo frames (no exception) so fallback actually triggers
-- Normalize Stooq output to Yahoo-like columns
-- Make weekend handling consistent and testable
-- Keep behavior and CSV formats compatible with prior runs
+This is a modified version of trading_script.py with the following EUR-specific features:
+- Automatic USD/EUR exchange rate fetching
+- All US stock prices converted to EUR
+- Display values in EUR (€) instead of USD ($)
+- Properly tracks costs and P&L in EUR accounting for FX conversion
+- Compatible with Trade Republic Germany
 
-Notes:
-- Some tickers/indices are not available on Stooq (e.g., ^RUT). These stay on Yahoo.
-- Stooq end date is exclusive; we add +1 day for ranges.
-- "Adj Close" is set equal to "Close" for Stooq to match downstream expectations.
+Usage:
+    python trading_script_eur.py --data-dir "Start Your Own"
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, cast,Dict, List, Optional
+from typing import Any, cast, Dict, List, Optional
 import os
 import warnings
 
 import numpy as np
 import pandas as pd
-import yfinance as yf # type: ignore
+import yfinance as yf
 import json
 import logging
-
-from decimal import Decimal, InvalidOperation
-import re
-import sys
-
 
 # Optional pandas-datareader import for Stooq access
 try:
@@ -41,10 +33,17 @@ try:
 except Exception:
     _HAS_PDR = False
 
+# -------- CURRENCY CONFIGURATION --------
+CURRENCY = "EUR"
+CURRENCY_SYMBOL = "€"
+FX_PAIR = "EURUSD=X"  # Yahoo Finance ticker for EUR/USD rate
+
+# Cache for FX rate (date -> rate)
+_FX_CACHE: Dict[str, float] = {}
+
 # -------- AS-OF override --------
 ASOF_DATE: pd.Timestamp | None = None
 
-# Set a global 'as of' date so the script treats that day as 'today'.
 def set_asof(date: str | datetime | pd.Timestamp | None) -> None:
     """Set a global 'as of' date so the script treats that day as 'today'. Use 'YYYY-MM-DD' format."""
     global ASOF_DATE
@@ -70,9 +69,9 @@ def _effective_now() -> datetime:
 # ------------------------------
 SCRIPT_DIR = Path(__file__).resolve().parent
 DATA_DIR = SCRIPT_DIR  # Save files alongside this script by default
-PORTFOLIO_CSV = DATA_DIR / "chatgpt_portfolio_update.csv"
-TRADE_LOG_CSV = DATA_DIR / "chatgpt_trade_log.csv"
-DEFAULT_BENCHMARKS = ["IWO", "XBI", "SPY", "IWM"] #benchmarks
+PORTFOLIO_CSV = DATA_DIR / "chatgpt_portfolio_update_eur.csv"
+TRADE_LOG_CSV = DATA_DIR / "chatgpt_trade_log_eur.csv"
+DEFAULT_BENCHMARKS = ["IWO", "XBI", "SPY", "IWM"]
 
 # Set up logger for this module
 logger = logging.getLogger(__name__)
@@ -80,7 +79,8 @@ logger = logging.getLogger(__name__)
 # Log initial global state configuration (only when run as main script)
 def _log_initial_state():
     """Log the initial global file path configuration."""
-    logger.info("=== Trading Script Initial Configuration ===")
+    logger.info("=== Trading Script Initial Configuration (EUR Version) ===")
+    logger.info("Currency: %s (%s)", CURRENCY, CURRENCY_SYMBOL)
     logger.info("Script directory: %s", SCRIPT_DIR)
     logger.info("Data directory: %s", DATA_DIR)
     logger.info("Portfolio CSV: %s", PORTFOLIO_CSV)
@@ -89,12 +89,62 @@ def _log_initial_state():
     logger.info("==============================================")
 
 # ------------------------------
-# Configuration helpers — benchmark tickers (tickers.json)
+# FX Rate Fetching
 # ------------------------------
 
+def get_usd_eur_rate(date: pd.Timestamp | None = None) -> float:
+    """
+    Fetch USD/EUR exchange rate for a given date.
+    Returns the rate to convert USD to EUR (multiply USD by this rate to get EUR).
 
+    For EUR/USD quote (e.g., 1.08), USD to EUR conversion is 1/rate.
+    Example: EUR/USD = 1.08 means 1 EUR = 1.08 USD, so 1 USD = 1/1.08 EUR ≈ 0.926 EUR
+    """
+    if date is None:
+        date = last_trading_date()
 
-logger = logging.getLogger(__name__)
+    date_str = date.date().isoformat()
+
+    # Check cache
+    if date_str in _FX_CACHE:
+        logger.debug("Using cached FX rate for %s: %.4f", date_str, _FX_CACHE[date_str])
+        return _FX_CACHE[date_str]
+
+    try:
+        # Fetch EUR/USD rate from Yahoo Finance
+        logger.info("Fetching USD/EUR exchange rate for %s", date_str)
+        start = date - pd.Timedelta(days=7)  # Look back a week to ensure we get data
+        end = date + pd.Timedelta(days=1)
+
+        fx_data = yf.download(FX_PAIR, start=start, end=end, progress=False)
+
+        if fx_data.empty:
+            logger.warning("No FX data available for %s, using default rate 0.92", date_str)
+            return 0.92  # Fallback rate
+
+        # Get the close price for the date (EUR/USD rate)
+        eur_usd_rate = float(fx_data['Close'].iloc[-1])
+
+        # Convert to USD/EUR rate (inverse)
+        usd_eur_rate = 1.0 / eur_usd_rate
+
+        _FX_CACHE[date_str] = usd_eur_rate
+        logger.info("EUR/USD rate: %.4f, USD/EUR rate: %.4f", eur_usd_rate, usd_eur_rate)
+
+        return usd_eur_rate
+
+    except Exception as e:
+        logger.error("Failed to fetch FX rate: %s. Using default rate 0.92", e)
+        return 0.92  # Approximate fallback rate
+
+def usd_to_eur(usd_amount: float, date: pd.Timestamp | None = None) -> float:
+    """Convert USD amount to EUR using the exchange rate for the given date."""
+    rate = get_usd_eur_rate(date)
+    return usd_amount * rate
+
+# ------------------------------
+# Configuration helpers — benchmark tickers (tickers.json)
+# ------------------------------
 
 def _read_json_file(path: Path) -> Optional[Dict]:
     """Read and parse JSON from `path`. Return dict on success, None if not found or invalid.
@@ -170,95 +220,6 @@ def load_benchmarks(script_dir: Path | None = None) -> List[str]:
     return result if result else DEFAULT_BENCHMARKS.copy()
 
 
-
-# ------------------------------
-# Equity parsing helper (CLI override)
-# ------------------------------
-def _normalize_number_string(s: str) -> str:
-    """Remove commas/underscores/spaces and optional leading $; preserve scientific notation."""
-    s = str(s).strip()
-    if s.startswith("$"):
-        s = s[1:]
-    # remove commas, underscores, spaces
-    s = re.sub(r"[,_\s]", "", s)
-    return s
-
-def parse_starting_equity(s: Union[str, float, Decimal]) -> Optional[Decimal]:
-    """Return Decimal if s represents a positive number, otherwise None."""
-    if isinstance(s, (float, Decimal)):
-        try:
-            d = Decimal(str(s))
-        except Exception:
-            return None
-    else:
-        try:
-            norm = _normalize_number_string(str(s))
-            if norm == "":
-                return None
-            d = Decimal(norm)
-        except (InvalidOperation, ValueError):
-            return None
-    if d <= 0:
-        return None
-    return d
-
-
-
-# ------------------------------
-# ISIN to Yahoo Finance ticker mapping
-# ------------------------------
-
-ISIN_TO_YAHOO: Dict[str, str] = {}
-
-def get_isin_mapping_file() -> Path:
-    """Get the path to the ISIN mapping JSON file."""
-    return DATA_DIR / "isin_mapping.json"
-
-def load_isin_mappings() -> None:
-    """Load ISIN→ticker mappings from JSON file on startup."""
-    global ISIN_TO_YAHOO
-    mapping_file = get_isin_mapping_file()
-    
-    if mapping_file.exists():
-        logger.info("Reading JSON file: %s", mapping_file)
-        try:
-            with open(mapping_file, 'r', encoding='utf-8') as f:
-                loaded = json.load(f)
-                ISIN_TO_YAHOO.update(loaded)
-            logger.info("Successfully loaded %d ISIN mappings from %s", len(loaded), mapping_file)
-        except json.JSONDecodeError as e:
-            logger.warning("Failed to parse ISIN mapping file %s: %s", mapping_file, e)
-        except Exception as e:
-            logger.warning("Failed to load ISIN mappings from %s: %s", mapping_file, e)
-    else:
-        logger.info("No existing ISIN mapping file found at %s", mapping_file)
-
-def save_isin_mappings() -> None:
-    """Save current ISIN→ticker mappings to JSON file."""
-    mapping_file = get_isin_mapping_file()
-    logger.info("Writing JSON file: %s", mapping_file)
-    try:
-        with open(mapping_file, 'w', encoding='utf-8') as f:
-            json.dump(ISIN_TO_YAHOO, f, indent=2, ensure_ascii=False)
-        logger.info("Successfully saved %d ISIN mappings to %s", len(ISIN_TO_YAHOO), mapping_file)
-    except Exception as e:
-        logger.error("Failed to save ISIN mappings to %s: %s", mapping_file, e)
-
-def add_isin_mapping(isin: str, ticker: str) -> None:
-    """Add a new ISIN→ticker mapping and save immediately."""
-    isin = isin.strip().upper()
-    ticker = ticker.strip().upper()
-    
-    ISIN_TO_YAHOO[isin] = ticker
-    save_isin_mappings()
-    
-    logger.info("Added ISIN mapping: %s → %s", isin, ticker)
-    print(f"✓ Saved mapping: {isin} → {ticker}")
-
-def get_yahoo_ticker_from_isin(isin: str) -> str | None:
-    """Convert ISIN to Yahoo Finance ticker. Returns None if not found."""
-    return ISIN_TO_YAHOO.get(isin.strip().upper())
-
 # ------------------------------
 # Date helpers
 # ------------------------------
@@ -312,9 +273,9 @@ class FetchResult:
     source: str  # "yahoo" | "stooq-pdr" | "stooq-csv" | "yahoo:<proxy>-proxy" | "empty"
 
 def _to_datetime_index(df: pd.DataFrame) -> pd.DataFrame:
-    if not isinstance(df.index, pd.DatetimeIndex): #check if index is already datetime
+    if not isinstance(df.index, pd.DatetimeIndex):
         try:
-            df.index = pd.to_datetime(df.index) #convert index to datetime
+            df.index = pd.to_datetime(df.index)
         except Exception:
             pass
     return df
@@ -334,7 +295,7 @@ def _normalize_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
         except Exception:
             df = df.copy()
             df.columns = ["_".join(map(str, t)).strip("_") for t in df.columns.to_flat_index()]
-            
+
     # Ensure all expected columns exist
     for c in ["Open", "High", "Low", "Close", "Volume"]:
         if c not in df.columns:
@@ -359,7 +320,6 @@ def _yahoo_download(ticker: str, **kwargs: Any) -> pd.DataFrame:
         try:
             with redirect_stdout(buf), redirect_stderr(buf):
                 df = cast(pd.DataFrame, yf.download(ticker, **kwargs))
-                
         except Exception:
             return pd.DataFrame()
     return df if isinstance(df, pd.DataFrame) else pd.DataFrame()
@@ -473,26 +433,17 @@ def download_price_data(ticker: str, **kwargs: Any) -> FetchResult:
     # ---------- 1) Yahoo (date-bounded) ----------
     df_y = _yahoo_download(ticker, start=s, end=e, **kwargs)
     if isinstance(df_y, pd.DataFrame) and not df_y.empty:
-        logger.info(f"Successfully retrieved {ticker} data from YahooFinance")
         return FetchResult(_normalize_ohlcv(_to_datetime_index(df_y)), "yahoo")
-    else:
-        logger.warning(f"Yahoo download failed for {ticker}. Trying Stooq...")
 
     # ---------- 2) Stooq via pandas-datareader ----------
     df_s = _stooq_download(ticker, start=s, end=e)
     if isinstance(df_s, pd.DataFrame) and not df_s.empty:
-        logger.info(f"Successfully retrieved {ticker} data from Stooq")
         return FetchResult(_normalize_ohlcv(_to_datetime_index(df_s)), "stooq-pdr")
-    else:
-        logger.warning(f"Stooq download failed for {ticker}. Trying direct CSV download...")
 
     # ---------- 3) Stooq direct CSV ----------
     df_csv = _stooq_csv_download(ticker, s, e)
     if isinstance(df_csv, pd.DataFrame) and not df_csv.empty:
-        logger.info(f"Successfully retrieved {ticker} data from CSV")
         return FetchResult(_normalize_ohlcv(_to_datetime_index(df_csv)), "stooq-csv")
-    else:
-        logger.warning(f"All sources failed to get {ticker}'s data")
 
     # ---------- 4) Proxy indices if applicable ----------
     proxy_map = {"^GSPC": "SPY", "^RUT": "IWM"}
@@ -501,7 +452,6 @@ def download_price_data(ticker: str, **kwargs: Any) -> FetchResult:
         df_proxy = _yahoo_download(proxy, start=s, end=e, **kwargs)
         if isinstance(df_proxy, pd.DataFrame) and not df_proxy.empty:
             return FetchResult(_normalize_ohlcv(_to_datetime_index(df_proxy)), f"yahoo:{proxy}-proxy")
-    
 
     # ---------- Nothing worked ----------
     empty = pd.DataFrame(columns=["Open", "High", "Low", "Close", "Adj Close", "Volume"])
@@ -519,8 +469,8 @@ def set_data_dir(data_dir: Path) -> None:
     DATA_DIR = Path(data_dir)
     logger.debug("Creating data directory if it doesn't exist: %s", DATA_DIR)
     os.makedirs(DATA_DIR, exist_ok=True)
-    PORTFOLIO_CSV = DATA_DIR / "chatgpt_portfolio_update.csv"
-    TRADE_LOG_CSV = DATA_DIR / "chatgpt_trade_log.csv"
+    PORTFOLIO_CSV = DATA_DIR / "chatgpt_portfolio_update_eur.csv"
+    TRADE_LOG_CSV = DATA_DIR / "chatgpt_trade_log_eur.csv"
     logger.info("Data directory configured - Portfolio CSV: %s, Trade Log CSV: %s", PORTFOLIO_CSV, TRADE_LOG_CSV)
 
 
@@ -536,7 +486,7 @@ def _ensure_df(portfolio: pd.DataFrame | dict[str, list[object]] | list[dict[str
         # Ensure proper columns exist even for empty DataFrames
         if df.empty:
             logger.debug("Creating empty portfolio DataFrame with proper column structure")
-            df = pd.DataFrame(columns=["isin", "ticker", "shares", "stop_loss", "buy_price", "cost_basis"])  # Added "isin"
+            df = pd.DataFrame(columns=["ticker", "shares", "stop_loss", "buy_price", "cost_basis"])
         return df
     raise TypeError("portfolio must be a DataFrame, dict, or list[dict]")
 
@@ -546,6 +496,7 @@ def process_portfolio(
     interactive: bool = True,
 ) -> tuple[pd.DataFrame, float]:
     today_iso = last_trading_date().date().isoformat()
+    today_ts = last_trading_date()
     portfolio_df = _ensure_df(portfolio)
 
     results: list[dict[str, object]] = []
@@ -557,28 +508,12 @@ def process_portfolio(
         while True:
             print(portfolio_df)
             action = input(
-                f""" You have {cash} in cash.
+                f""" You have {CURRENCY_SYMBOL}{cash:.2f} in cash.
 Would you like to log a manual trade? Enter 'b' for buy, 's' for sell, or press Enter to continue: """
             ).strip().lower()
 
             if action == "b":
-                # Ask for ISIN first
-                isin = input("Enter ISIN (e.g., US0378331005): ").strip().upper()
-                
-                # Check if we have a mapping
-                ticker = get_yahoo_ticker_from_isin(isin)
-                
-                if ticker is None:
-                    print(f"ISIN {isin} not found in mapping.")
-                    ticker = input("Enter Yahoo Finance ticker (e.g., AAPL): ").strip().upper()
-                    
-                    # Ask if they want to save this mapping
-                    save_mapping = input(f"Save mapping {isin} → {ticker}? (y/n): ").strip().lower()
-                    if save_mapping == 'y':
-                        add_isin_mapping(isin, ticker)
-                else:
-                    print(f"Using ticker: {ticker} (from ISIN {isin})")
-                
+                ticker = input("Enter ticker symbol: ").strip().upper()
                 order_type = input("Order type? 'm' = market-on-open, 'l' = limit: ").strip().lower()
 
                 try:
@@ -591,8 +526,8 @@ Would you like to log a manual trade? Enter 'b' for buy, 's' for sell, or press 
 
                 if order_type == "m":
                     try:
-                        stop_loss = float(input("Enter stop loss (or 0 to skip): "))
-                        if stop_loss < 0:
+                        stop_loss_usd = float(input("Enter stop loss in USD (or 0 to skip): "))
+                        if stop_loss_usd < 0:
                             raise ValueError
                     except ValueError:
                         print("Invalid stop loss. Buy cancelled.")
@@ -605,18 +540,24 @@ Would you like to log a manual trade? Enter 'b' for buy, 's' for sell, or press 
                         print(f"MOO buy for {ticker} failed: no market data available (source={fetch.source}).")
                         continue
 
-                    o = float(data["Open"].iloc[-1]) if "Open" in data else float(data["Close"].iloc[-1])
-                    exec_price = round(o, 2)
-                    notional = exec_price * shares
+                    o_usd = float(data["Open"].iloc[-1]) if "Open" in data else float(data["Close"].iloc[-1])
+                    exec_price_usd = round(o_usd, 2)
+
+                    # Convert to EUR
+                    exec_price_eur = usd_to_eur(exec_price_usd, today_ts)
+                    stop_loss_eur = usd_to_eur(stop_loss_usd, today_ts) if stop_loss_usd > 0 else 0.0
+
+                    notional = exec_price_eur * shares
                     if notional > cash:
-                        print(f"MOO buy for {ticker} failed: cost {notional:.2f} exceeds cash {cash:.2f}.")
+                        print(f"MOO buy for {ticker} failed: cost {CURRENCY_SYMBOL}{notional:.2f} exceeds cash {CURRENCY_SYMBOL}{cash:.2f}.")
                         continue
 
                     log = {
                         "Date": today_iso,
                         "Ticker": ticker,
                         "Shares Bought": shares,
-                        "Buy Price": exec_price,
+                        "Buy Price (EUR)": exec_price_eur,
+                        "Buy Price (USD)": exec_price_usd,
                         "Cost Basis": notional,
                         "PnL": 0.0,
                         "Reason": "MANUAL BUY MOO - Filled",
@@ -639,12 +580,11 @@ Would you like to log a manual trade? Enter 'b' for buy, 's' for sell, or press 
                     rows = portfolio_df.loc[portfolio_df["ticker"].astype(str).str.upper() == ticker.upper()]
                     if rows.empty:
                         new_trade = {
-                            "isin": isin,  # Added ISIN field
                             "ticker": ticker,
-                            "shares": shares,
-                            "stop_loss": float(stop_loss),
-                            "buy_price": exec_price,
-                            "cost_basis": notional,
+                            "shares": float(shares),
+                            "stop_loss": float(stop_loss_eur),
+                            "buy_price": float(exec_price_eur),
+                            "cost_basis": float(notional),
                         }
                         if portfolio_df.empty:
                             portfolio_df = pd.DataFrame([new_trade])
@@ -660,25 +600,24 @@ Would you like to log a manual trade? Enter 'b' for buy, 's' for sell, or press 
                         portfolio_df.at[idx, "shares"] = new_shares
                         portfolio_df.at[idx, "cost_basis"] = new_cost
                         portfolio_df.at[idx, "buy_price"] = avg_price
-                        portfolio_df.at[idx, "stop_loss"] = float(stop_loss)
-                        portfolio_df.at[idx, "isin"] = isin  # Update ISIN
+                        portfolio_df.at[idx, "stop_loss"] = float(stop_loss_eur)
 
                     cash -= notional
-                    print(f"Manual BUY MOO for {ticker} filled at ${exec_price:.2f} ({fetch.source}).")
+                    print(f"Manual BUY MOO for {ticker} filled at ${exec_price_usd:.2f} USD ({CURRENCY_SYMBOL}{exec_price_eur:.2f} EUR) ({fetch.source}).")
                     continue
 
                 elif order_type == "l":
                     try:
-                        buy_price = float(input("Enter buy LIMIT price: "))
-                        stop_loss = float(input("Enter stop loss (or 0 to skip): "))
-                        if buy_price <= 0 or stop_loss < 0:
+                        buy_price_usd = float(input("Enter buy LIMIT price in USD: "))
+                        stop_loss_usd = float(input("Enter stop loss in USD (or 0 to skip): "))
+                        if buy_price_usd <= 0 or stop_loss_usd < 0:
                             raise ValueError
                     except ValueError:
                         print("Invalid input. Limit buy cancelled.")
                         continue
 
                     cash, portfolio_df = log_manual_buy(
-                        buy_price, shares, ticker, stop_loss, cash, portfolio_df, isin=isin
+                        buy_price_usd, shares, ticker, stop_loss_usd, cash, portfolio_df
                     )
                     continue
                 else:
@@ -691,20 +630,27 @@ Would you like to log a manual trade? Enter 'b' for buy, 's' for sell, or press 
                     sell_order_type = input("Order type? 'm' = market-on-open, 'l' = limit: ").strip().lower()
                     shares = float(input("Enter number of shares to sell: "))
                     if sell_order_type == 'l':
-                        sell_price = float(input("Enter sell LIMIT price: "))
+                        sell_price_usd = float(input("Enter sell LIMIT price in USD: "))
                     elif sell_order_type == 'm':
-                        sell_price = o
+                        # Get current price
+                        s, e = trading_day_window()
+                        fetch = download_price_data(ticker, start=s, end=e, auto_adjust=False, progress=False)
+                        if not fetch.df.empty:
+                            sell_price_usd = float(fetch.df["Open"].iloc[-1]) if "Open" in fetch.df else float(fetch.df["Close"].iloc[-1])
+                        else:
+                            print(f"Cannot get price for {ticker}")
+                            continue
                     else:
                         print("Unknown order type. Use 'm' or 'l'.")
                         continue
-                    if shares <= 0 or sell_price <= 0:
+                    if shares <= 0 or sell_price_usd <= 0:
                         raise ValueError
                 except ValueError:
                     print("Invalid input. Manual sell cancelled.")
                     continue
 
                 cash, portfolio_df = log_manual_sell(
-                    sell_price, shares, ticker, cash, portfolio_df
+                    sell_price_usd, shares, ticker, cash, portfolio_df
                 )
                 continue
 
@@ -715,58 +661,61 @@ Would you like to log a manual trade? Enter 'b' for buy, 's' for sell, or press 
     for _, stock in portfolio_df.iterrows():
         ticker = str(stock["ticker"]).upper()
         shares = int(stock["shares"]) if not pd.isna(stock["shares"]) else 0
-        cost = float(stock["buy_price"]) if not pd.isna(stock["buy_price"]) else 0.0
-        cost_basis = float(stock["cost_basis"]) if not pd.isna(stock["cost_basis"]) else cost * shares
-        stop = float(stock["stop_loss"]) if not pd.isna(stock["stop_loss"]) else 0.0
+        cost_eur = float(stock["buy_price"]) if not pd.isna(stock["buy_price"]) else 0.0
+        cost_basis = float(stock["cost_basis"]) if not pd.isna(stock["cost_basis"]) else cost_eur * shares
+        stop_eur = float(stock["stop_loss"]) if not pd.isna(stock["stop_loss"]) else 0.0
 
         fetch = download_price_data(ticker, start=s, end=e, auto_adjust=False, progress=False)
         data = fetch.df
-        
-        # Get ISIN from stock dict
-        isin_value = stock.get("isin", "") if isinstance(stock, dict) else ""
 
         if data.empty:
             print(f"No data for {ticker} (source={fetch.source}).")
             row = {
-                "Date": today_iso, "ISIN": isin_value, "Ticker": ticker, "Shares": shares,
-                "Buy Price": cost, "Cost Basis": cost_basis, "Stop Loss": stop,
+                "Date": today_iso, "Ticker": ticker, "Shares": shares,
+                "Buy Price": cost_eur, "Cost Basis": cost_basis, "Stop Loss": stop_eur,
                 "Current Price": "", "Total Value": "", "PnL": "",
                 "Action": "NO DATA", "Cash Balance": "", "Total Equity": "",
             }
             results.append(row)
             continue
 
-        o = float(data["Open"].iloc[-1]) if "Open" in data else np.nan
-        h = float(data["High"].iloc[-1])
-        l = float(data["Low"].iloc[-1])
-        c = float(data["Close"].iloc[-1])
-        if np.isnan(o):
-            o = c
+        # Get USD prices and convert to EUR
+        o_usd = float(data["Open"].iloc[-1]) if "Open" in data else np.nan
+        h_usd = float(data["High"].iloc[-1])
+        l_usd = float(data["Low"].iloc[-1])
+        c_usd = float(data["Close"].iloc[-1])
+        if np.isnan(o_usd):
+            o_usd = c_usd
 
-        if stop and l <= stop:
-            exec_price = round(o if o <= stop else stop, 2)
+        # Convert to EUR
+        o_eur = usd_to_eur(o_usd, today_ts)
+        h_eur = usd_to_eur(h_usd, today_ts)
+        l_eur = usd_to_eur(l_usd, today_ts)
+        c_eur = usd_to_eur(c_usd, today_ts)
+
+        if stop_eur and l_eur <= stop_eur:
+            exec_price = round(o_eur if o_eur <= stop_eur else stop_eur, 2)
             value = round(exec_price * shares, 2)
-            pnl = round((exec_price - cost) * shares, 2)
+            pnl = round((exec_price - cost_eur) * shares, 2)
             action = "SELL - Stop Loss Triggered"
             cash += value
-            portfolio_df = log_sell(ticker, shares, exec_price, cost, pnl, portfolio_df)
+            portfolio_df = log_sell(ticker, shares, exec_price, cost_eur, pnl, portfolio_df)
             row = {
                 "Date": today_iso, "Ticker": ticker, "Shares": shares,
-                "Buy Price": cost, "Cost Basis": cost_basis, "Stop Loss": stop,
+                "Buy Price": cost_eur, "Cost Basis": cost_basis, "Stop Loss": stop_eur,
                 "Current Price": exec_price, "Total Value": value, "PnL": pnl,
                 "Action": action, "Cash Balance": "", "Total Equity": "",
             }
         else:
-            price = round(c, 2)
+            price = round(c_eur, 2)
             value = round(price * shares, 2)
-            pnl = round((price - cost) * shares, 2)
+            pnl = round((price - cost_eur) * shares, 2)
             action = "HOLD"
             total_value += value
             total_pnl += pnl
-            isin_value = str(stock.get("isin", "")) if hasattr(stock, 'get') else ""
             row = {
-                "Date": today_iso, "ISIN": isin_value, "Ticker": ticker, "Shares": shares, 
-                "Buy Price": cost, "Cost Basis": cost_basis, "Stop Loss": stop,
+                "Date": today_iso, "Ticker": ticker, "Shares": shares,
+                "Buy Price": cost_eur, "Cost Basis": cost_basis, "Stop Loss": stop_eur,
                 "Current Price": price, "Total Value": value, "PnL": pnl,
                 "Action": action, "Cash Balance": "", "Total Equity": "",
             }
@@ -774,7 +723,7 @@ Would you like to log a manual trade? Enter 'b' for buy, 's' for sell, or press 
         results.append(row)
 
     total_row = {
-        "Date": today_iso, "ISIN": "", "Ticker": "TOTAL", "Shares": "", "Buy Price": "",
+        "Date": today_iso, "Ticker": "TOTAL", "Shares": "", "Buy Price": "",
         "Cost Basis": "", "Stop Loss": "", "Current Price": "",
         "Total Value": round(total_value, 2), "PnL": round(total_pnl, 2),
         "Action": "", "Cash Balance": round(cash, 2),
@@ -783,35 +732,15 @@ Would you like to log a manual trade? Enter 'b' for buy, 's' for sell, or press 
     results.append(total_row)
 
     df_out = pd.DataFrame(results)
-    
-      # --- Safely append to existing portfolio CSV (avoid FutureWarning on concat) ---
     if PORTFOLIO_CSV.exists():
         logger.info("Reading CSV file: %s", PORTFOLIO_CSV)
         existing = pd.read_csv(PORTFOLIO_CSV)
         logger.info("Successfully read CSV file: %s", PORTFOLIO_CSV)
-
-        # Remove any rows for today's date so we don't duplicate
         existing = existing[existing["Date"] != str(today_iso)]
-
         print("Saving results to CSV...")
-
-        if existing.empty:
-            # Nothing to preserve — write the new results directly
-            combined = df_out
-        else:
-            # Ensure columns line up to avoid dtype/column-order surprises
-            try:
-                existing = existing.reindex(columns=df_out.columns)
-            except Exception:
-                # Fall back to best-effort concat if reindexing fails
-                logger.debug("Reindexing existing CSV to match df_out columns failed; falling back to concat with sort=False")
-            combined = pd.concat([existing, df_out], ignore_index=True, sort=False)
-    else:
-        combined = df_out
-
-
+        df_out = pd.concat([existing, df_out], ignore_index=True)
     logger.info("Writing CSV file: %s", PORTFOLIO_CSV)
-    combined.to_csv(PORTFOLIO_CSV, index=False)
+    df_out.to_csv(PORTFOLIO_CSV, index=False)
     logger.info("Successfully wrote CSV file: %s", PORTFOLIO_CSV)
 
     return portfolio_df, cash
@@ -829,15 +758,13 @@ def log_sell(
     cost: float,
     pnl: float,
     portfolio: pd.DataFrame,
-    isin: str = "",  # Add this
 ) -> pd.DataFrame:
     today = check_weekend()
     log = {
         "Date": today,
-        "ISIN": isin,
         "Ticker": ticker,
         "Shares Sold": shares,
-        "Sell Price": price,
+        "Sell Price (EUR)": price,
         "Cost Basis": cost,
         "PnL": pnl,
         "Reason": "AUTOMATED SELL - STOPLOSS TRIGGERED",
@@ -861,20 +788,20 @@ def log_sell(
     return portfolio
 
 def log_manual_buy(
-    buy_price: float,
+    buy_price_usd: float,
     shares: float,
     ticker: str,
-    stoploss: float,
+    stoploss_usd: float,
     cash: float,
     chatgpt_portfolio: pd.DataFrame,
-    isin: str | None = None,
     interactive: bool = True,
 ) -> tuple[float, pd.DataFrame]:
     today = check_weekend()
+    today_ts = last_trading_date()
 
     if interactive:
         check = input(
-            f"You are placing a BUY LIMIT for {shares} {ticker} at ${buy_price:.2f}.\n"
+            f"You are placing a BUY LIMIT for {shares} {ticker} at ${buy_price_usd:.2f} USD.\n"
             f"If this is a mistake, type '1' or, just hit Enter: "
         )
         if check == "1":
@@ -893,30 +820,35 @@ def log_manual_buy(
         print(f"Manual buy for {ticker} failed: no market data available (source={fetch.source}).")
         return cash, chatgpt_portfolio
 
-    o = float(data.get("Open", [np.nan])[-1])
-    h = float(data["High"].iloc[-1])
-    l = float(data["Low"].iloc[-1])
-    if np.isnan(o):
-        o = float(data["Close"].iloc[-1])
+    o_usd = float(data.get("Open", [np.nan])[-1])
+    h_usd = float(data["High"].iloc[-1])
+    l_usd = float(data["Low"].iloc[-1])
+    if np.isnan(o_usd):
+        o_usd = float(data["Close"].iloc[-1])
 
-    if o <= buy_price:
-        exec_price = o
-    elif l <= buy_price:
-        exec_price = buy_price
+    if o_usd <= buy_price_usd:
+        exec_price_usd = o_usd
+    elif l_usd <= buy_price_usd:
+        exec_price_usd = buy_price_usd
     else:
-        print(f"Buy limit ${buy_price:.2f} for {ticker} not reached today (range {l:.2f}-{h:.2f}). Order not filled.")
+        print(f"Buy limit ${buy_price_usd:.2f} USD for {ticker} not reached today (range ${l_usd:.2f}-${h_usd:.2f} USD). Order not filled.")
         return cash, chatgpt_portfolio
 
-    cost_amt = exec_price * shares
+    # Convert to EUR
+    exec_price_eur = usd_to_eur(exec_price_usd, today_ts)
+    stoploss_eur = usd_to_eur(stoploss_usd, today_ts) if stoploss_usd > 0 else 0.0
+
+    cost_amt = exec_price_eur * shares
     if cost_amt > cash:
-        print(f"Manual buy for {ticker} failed: cost {cost_amt:.2f} exceeds cash balance {cash:.2f}.")
+        print(f"Manual buy for {ticker} failed: cost {CURRENCY_SYMBOL}{cost_amt:.2f} exceeds cash balance {CURRENCY_SYMBOL}{cash:.2f}.")
         return cash, chatgpt_portfolio
 
     log = {
         "Date": today,
         "Ticker": ticker,
         "Shares Bought": shares,
-        "Buy Price": exec_price,
+        "Buy Price (EUR)": exec_price_eur,
+        "Buy Price (USD)": exec_price_usd,
         "Cost Basis": cost_amt,
         "PnL": 0.0,
         "Reason": "MANUAL BUY LIMIT - Filled",
@@ -939,21 +871,19 @@ def log_manual_buy(
     if rows.empty:
         if chatgpt_portfolio.empty:
             chatgpt_portfolio = pd.DataFrame([{
-                "isin": isin,  # Add ISIN field
                 "ticker": ticker,
                 "shares": float(shares),
-                "stop_loss": float(stoploss),
-                "buy_price": float(exec_price),
+                "stop_loss": float(stoploss_eur),
+                "buy_price": float(exec_price_eur),
                 "cost_basis": float(cost_amt),
             }])
         else:
             chatgpt_portfolio = pd.concat(
                 [chatgpt_portfolio, pd.DataFrame([{
-                    "isin": isin,  # Add ISIN field
                     "ticker": ticker,
                     "shares": float(shares),
-                    "stop_loss": float(stoploss),
-                    "buy_price": float(exec_price),
+                    "stop_loss": float(stoploss_eur),
+                    "buy_price": float(exec_price_eur),
                     "cost_basis": float(cost_amt),
                 }])],
                 ignore_index=True
@@ -967,15 +897,14 @@ def log_manual_buy(
         chatgpt_portfolio.at[idx, "shares"] = new_shares
         chatgpt_portfolio.at[idx, "cost_basis"] = new_cost
         chatgpt_portfolio.at[idx, "buy_price"] = new_cost / new_shares if new_shares else 0.0
-        chatgpt_portfolio.at[idx, "stop_loss"] = float(stoploss)
-        chatgpt_portfolio.at[idx, "isin"] = isin  # Update ISIN
+        chatgpt_portfolio.at[idx, "stop_loss"] = float(stoploss_eur)
 
     cash -= cost_amt
-    print(f"Manual BUY LIMIT for {ticker} filled at ${exec_price:.2f} ({fetch.source}).")
+    print(f"Manual BUY LIMIT for {ticker} filled at ${exec_price_usd:.2f} USD ({CURRENCY_SYMBOL}{exec_price_eur:.2f} EUR) ({fetch.source}).")
     return cash, chatgpt_portfolio
 
 def log_manual_sell(
-    sell_price: float,
+    sell_price_usd: float,
     shares_sold: float,
     ticker: str,
     cash: float,
@@ -984,9 +913,11 @@ def log_manual_sell(
     interactive: bool = True,
 ) -> tuple[float, pd.DataFrame]:
     today = check_weekend()
+    today_ts = last_trading_date()
+
     if interactive:
         reason = input(
-            f"""You are placing a SELL LIMIT for {shares_sold} {ticker} at ${sell_price:.2f}.
+            f"""You are placing a SELL LIMIT for {shares_sold} {ticker} at ${sell_price_usd:.2f} USD.
 If this is a mistake, enter 1, or hit Enter."""
         )
     if reason == "1":
@@ -1012,30 +943,33 @@ If this is a mistake, enter 1, or hit Enter."""
         print(f"Manual sell for {ticker} failed: no market data available (source={fetch.source}).")
         return cash, chatgpt_portfolio
 
-    o = float(data["Open"].iloc[-1]) if "Open" in data else np.nan
-    h = float(data["High"].iloc[-1])
-    l = float(data["Low"].iloc[-1])
-    if np.isnan(o):
-        o = float(data["Close"].iloc[-1])
+    o_usd = float(data["Open"].iloc[-1]) if "Open" in data else np.nan
+    h_usd = float(data["High"].iloc[-1])
+    l_usd = float(data["Low"].iloc[-1])
+    if np.isnan(o_usd):
+        o_usd = float(data["Close"].iloc[-1])
 
-    if o >= sell_price:
-        exec_price = o
-    elif h >= sell_price:
-        exec_price = sell_price
+    if o_usd >= sell_price_usd:
+        exec_price_usd = o_usd
+    elif h_usd >= sell_price_usd:
+        exec_price_usd = sell_price_usd
     else:
-        print(f"Sell limit ${sell_price:.2f} for {ticker} not reached today (range {l:.2f}-{h:.2f}). Order not filled.")
+        print(f"Sell limit ${sell_price_usd:.2f} USD for {ticker} not reached today (range ${l_usd:.2f}-${h_usd:.2f} USD). Order not filled.")
         return cash, chatgpt_portfolio
 
-    buy_price = float(ticker_row["buy_price"].item())
-    cost_basis = buy_price * shares_sold
-    pnl = exec_price * shares_sold - cost_basis
+    # Convert to EUR
+    exec_price_eur = usd_to_eur(exec_price_usd, today_ts)
+
+    buy_price_eur = float(ticker_row["buy_price"].item())
+    cost_basis = buy_price_eur * shares_sold
+    pnl = exec_price_eur * shares_sold - cost_basis
 
     log = {
         "Date": today, "Ticker": ticker,
-        "Shares Bought": "", "Buy Price": "",
+        "Shares Bought": "", "Buy Price (EUR)": "", "Buy Price (USD)": "",
         "Cost Basis": cost_basis, "PnL": pnl,
         "Reason": f"MANUAL SELL LIMIT - {reason}", "Shares Sold": shares_sold,
-        "Sell Price": exec_price,
+        "Sell Price (EUR)": exec_price_eur, "Sell Price (USD)": exec_price_usd,
     }
     if os.path.exists(TRADE_LOG_CSV):
         logger.info("Reading CSV file: %s", TRADE_LOG_CSV)
@@ -1061,8 +995,8 @@ If this is a mistake, enter 1, or hit Enter."""
             chatgpt_portfolio.at[row_index, "shares"] * chatgpt_portfolio.at[row_index, "buy_price"]
         )
 
-    cash += shares_sold * exec_price
-    print(f"Manual SELL LIMIT for {ticker} filled at ${exec_price:.2f} ({fetch.source}).")
+    cash += shares_sold * exec_price_eur
+    print(f"Manual SELL LIMIT for {ticker} filled at ${exec_price_usd:.2f} USD ({CURRENCY_SYMBOL}{exec_price_eur:.2f} EUR) ({fetch.source}).")
     return cash, chatgpt_portfolio
 
 
@@ -1072,16 +1006,17 @@ If this is a mistake, enter 1, or hit Enter."""
 # ------------------------------
 
 def daily_results(chatgpt_portfolio: pd.DataFrame, cash: float) -> None:
-    """Print daily price updates and performance metrics (incl. CAPM)."""
+    """Print daily price updates and performance metrics (incl. CAPM) - EUR VERSION."""
     portfolio_dict: list[dict[Any, Any]] = chatgpt_portfolio.to_dict(orient="records")
     today = check_weekend()
+    today_ts = last_trading_date()
 
     rows: list[list[str]] = []
-    header = ["Ticker", "Close", "% Chg", "Volume"]
+    header = ["Ticker", "Close (EUR)", "% Chg", "Volume"]
 
     end_d = last_trading_date()                           # Fri on weekends
     start_d = (end_d - pd.Timedelta(days=4)).normalize()  # go back enough to capture 2 sessions even around holidays
-    
+
     benchmarks = load_benchmarks()  # reads tickers.json or returns defaults
     benchmark_entries = [{"ticker": t} for t in benchmarks]
 
@@ -1094,12 +1029,15 @@ def daily_results(chatgpt_portfolio: pd.DataFrame, cash: float) -> None:
                 rows.append([ticker, "—", "—", "—"])
                 continue
 
-            price = float(data["Close"].iloc[-1]) #Today's close
-            last_price = float(data["Close"].iloc[-2]) #Previous close
-            volume = float(data["Volume"].iloc[-1]) #Today's volume
+            price_usd = float(data["Close"].iloc[-1])
+            last_price_usd = float(data["Close"].iloc[-2])
+            volume = float(data["Volume"].iloc[-1])
 
-            percent_change = ((price - last_price) / last_price) * 100
-            rows.append([ticker, f"{price:,.2f}", f"{percent_change:+.2f}%", f"{int(volume):,}"])
+            # Convert to EUR
+            price_eur = usd_to_eur(price_usd, today_ts)
+
+            percent_change = ((price_usd - last_price_usd) / last_price_usd) * 100
+            rows.append([ticker, f"{price_eur:,.2f}", f"{percent_change:+.2f}%", f"{int(volume):,}"])
         except Exception as e:
             raise Exception(f"Download for {ticker} failed. {e} Try checking internet connection.")
 
@@ -1112,17 +1050,17 @@ def daily_results(chatgpt_portfolio: pd.DataFrame, cash: float) -> None:
     totals = chatgpt_df[chatgpt_df["Ticker"] == "TOTAL"].copy()
     if totals.empty:
         print("\n" + "=" * 64)
-        print(f"Daily Results — {today}")
+        print(f"Daily Results — {today} (EUR)")
         print("=" * 64)
         print("\n[ Price & Volume ]")
-        colw = [10, 12, 9, 15]
+        colw = [10, 14, 9, 15]
         print(f"{header[0]:<{colw[0]}} {header[1]:>{colw[1]}} {header[2]:>{colw[2]}} {header[3]:>{colw[3]}}")
         print("-" * sum(colw) + "-" * 3)
         for r in rows:
             print(f"{str(r[0]):<{colw[0]}} {str(r[1]):>{colw[1]}} {str(r[2]):>{colw[2]}} {str(r[3]):>{colw[3]}}")
         print("\n[ Portfolio Snapshot ]")
         print(chatgpt_portfolio)
-        print(f"Cash balance: ${cash:,.2f}")
+        print(f"Cash balance: {CURRENCY_SYMBOL}{cash:,.2f}")
         return
 
     totals["Date"] = pd.to_datetime(totals["Date"], format="mixed", errors="coerce")  # tolerate ISO strings
@@ -1142,18 +1080,18 @@ def daily_results(chatgpt_portfolio: pd.DataFrame, cash: float) -> None:
     n_days = len(r)
     if n_days < 2:
         print("\n" + "=" * 64)
-        print(f"Daily Results — {today}")
+        print(f"Daily Results — {today} (EUR)")
         print("=" * 64)
         print("\n[ Price & Volume ]")
-        colw = [10, 12, 9, 15]
+        colw = [10, 14, 9, 15]
         print(f"{header[0]:<{colw[0]}} {header[1]:>{colw[1]}} {header[2]:>{colw[2]}} {header[3]:>{colw[3]}}")
         print("-" * sum(colw) + "-" * 3)
         for rrow in rows:
             print(f"{str(rrow[0]):<{colw[0]}} {str(rrow[1]):>{colw[1]}} {str(rrow[2]):>{colw[2]}} {str(rrow[3]):>{colw[3]}}")
         print("\n[ Portfolio Snapshot ]")
         print(chatgpt_portfolio)
-        print(f"Cash balance: ${cash:,.2f}")
-        print(f"Latest ChatGPT Equity: ${final_equity:,.2f}")
+        print(f"Cash balance: {CURRENCY_SYMBOL}{cash:,.2f}")
+        print(f"Latest ChatGPT Equity: {CURRENCY_SYMBOL}{final_equity:,.2f}")
         if hasattr(mdd_date, "date") and not isinstance(mdd_date, (str, int)):
             mdd_date_str = mdd_date.date()
         elif hasattr(mdd_date, "strftime") and not isinstance(mdd_date, (str, int)):
@@ -1164,7 +1102,7 @@ def daily_results(chatgpt_portfolio: pd.DataFrame, cash: float) -> None:
         return
 
     # Risk-free config
-    rf_annual = 0.045
+    rf_annual = 0.03  # ECB rate ~3% (adjust as needed)
     rf_daily = (1 + rf_annual) ** (1 / 252) - 1
     rf_period = (1 + rf_daily) ** n_days - 1
 
@@ -1228,6 +1166,9 @@ def daily_results(chatgpt_portfolio: pd.DataFrame, cash: float) -> None:
                 corr = np.corrcoef(x, y)[0, 1]
                 r2 = float(corr ** 2)
 
+    # Note: For EUR portfolio vs USD S&P 500, beta/alpha will include FX effects
+    # This is actually what you want - total return in your currency vs market
+
     # $X normalized S&P 500 over same window (asks user for initial equity)
     spx_norm_fetch = download_price_data(
         "^GSPC",
@@ -1236,25 +1177,30 @@ def daily_results(chatgpt_portfolio: pd.DataFrame, cash: float) -> None:
         progress=False,
     )
     spx_norm = spx_norm_fetch.df
-    spx_value = np.nan
+    spx_value_eur = np.nan
     starting_equity = np.nan  # Ensure starting_equity is always defined
     if not spx_norm.empty:
-        initial_price = float(spx_norm["Close"].iloc[0])
-        price_now = float(spx_norm["Close"].iloc[-1])
+        initial_price_usd = float(spx_norm["Close"].iloc[0])
+        price_now_usd = float(spx_norm["Close"].iloc[-1])
+
+        # Convert S&P prices to EUR
+        initial_price_eur = usd_to_eur(initial_price_usd, equity_series.index.min())
+        price_now_eur = usd_to_eur(price_now_usd, equity_series.index.max())
+
         try:
-            starting_equity = float(input("what was your starting equity? "))
+            starting_equity = float(input(f"What was your starting equity in EUR ({CURRENCY_SYMBOL})? "))
         except Exception:
             print("Invalid input for starting equity. Defaulting to NaN.")
-        spx_value = (starting_equity / initial_price) * price_now if not np.isnan(starting_equity) else np.nan
+        spx_value_eur = (starting_equity / initial_price_eur) * price_now_eur if not np.isnan(starting_equity) else np.nan
 
     # -------- Pretty Printing --------
     print("\n" + "=" * 64)
-    print(f"Daily Results — {today}")
+    print(f"Daily Results — {today} (EUR)")
     print("=" * 64)
 
     # Price & Volume table
     print("\n[ Price & Volume ]")
-    colw = [10, 12, 9, 15]
+    colw = [10, 14, 9, 15]
     print(f"{header[0]:<{colw[0]}} {header[1]:>{colw[1]}} {header[2]:>{colw[2]}} {header[3]:>{colw[3]}}")
     print("-" * sum(colw) + "-" * 3)
     for rrow in rows:
@@ -1284,17 +1230,18 @@ def daily_results(chatgpt_portfolio: pd.DataFrame, cash: float) -> None:
         print(f"{'R² (fit quality):':32} {r2:>15.3f}   {'Obs:':>6} {n_obs}")
         if n_obs < 60 or (not np.isnan(r2) and r2 < 0.20):
             print("  Note: Short sample and/or low R² — alpha/beta may be unstable.")
+        print("  Note: Beta/Alpha include FX effects (EUR vs USD market)")
     else:
         print("Beta/Alpha: insufficient overlapping data.")
 
     print("\n[ Snapshot ]")
-    print(f"{'Latest ChatGPT Equity:':32} ${final_equity:>14,.2f}")
-    if not np.isnan(spx_value):
+    print(f"{'Latest Portfolio Equity:':32} {CURRENCY_SYMBOL}{final_equity:>14,.2f}")
+    if not np.isnan(spx_value_eur):
         try:
-            print(f"{f'${starting_equity} in S&P 500 (same window):':32} ${spx_value:>14,.2f}")
+            print(f"{f'{CURRENCY_SYMBOL}{starting_equity:.0f} in S&P 500 (same window):':32} {CURRENCY_SYMBOL}{spx_value_eur:>14,.2f}")
         except Exception:
             pass
-    print(f"{'Cash Balance:':32} ${cash:>14,.2f}")
+    print(f"{'Cash Balance:':32} {CURRENCY_SYMBOL}{cash:>14,.2f}")
 
     print("\n[ Holdings ]")
     print(chatgpt_portfolio)
@@ -1306,6 +1253,8 @@ def daily_results(chatgpt_portfolio: pd.DataFrame, cash: float) -> None:
         "If you do not make a clear indication to change positions IMMEDIATELY after this message, the portfolio remains unchanged for tomorrow.\n"
         "You are encouraged to use the internet to check current prices (and related up-to-date info) for potential buys.\n"
         "\n"
+        "NOTE: All prices displayed are in EUR. When providing recommendations, please specify prices in USD as that's what Trade Republic uses for US stocks.\n"
+        "\n"
         "*Paste everything above into ChatGPT*"
     )
 
@@ -1314,57 +1263,29 @@ def daily_results(chatgpt_portfolio: pd.DataFrame, cash: float) -> None:
 # Orchestration
 # ------------------------------
 
-def load_latest_portfolio_state(
-    starting_equity_override: Optional[Union[str, float, Decimal]] = None,
-) -> tuple[pd.DataFrame | list[dict[str, Any]], float]:
-    """Load the most recent portfolio snapshot and cash balance from global PORTFOLIO_CSV.
-    
-     If the portfolio CSV is empty, this function will:
-      - Use `starting_equity_override` if provided (validated), or
-      - Prompt interactively for a starting cash amount (if stdin is interactive), or
-      - Exit with code 2 if stdin is not interactive and no override provided
-    """
+def load_latest_portfolio_state() -> tuple[pd.DataFrame | list[dict[str, Any]], float]:
+    """Load the most recent portfolio snapshot and cash balance from global PORTFOLIO_CSV."""
     logger.info("Reading CSV file: %s", PORTFOLIO_CSV)
     try:
         df = pd.read_csv(PORTFOLIO_CSV)
     except FileNotFoundError as e:
         raise FileNotFoundError(
         f"Could not find portfolio CSV at {PORTFOLIO_CSV}.\n"
-        "Make sure you're not running trading_script.py directly without the necessary file.\n"
-        "To fix this, either:\n"
-        "  1) Run the wrapper file: 'Start Your Own/ProcessPortfolio.py',\n"
-        "  2) Run: python trading_script.py --data-dir 'Start Your Own'"
+        "Make sure you're running the EUR version correctly.\n"
+        "To fix this, run: python trading_script_eur.py --data-dir 'Start Your Own'"
     ) from e
 
     logger.info("Successfully read CSV file: %s", PORTFOLIO_CSV)
     if df.empty:
         portfolio = pd.DataFrame(columns=["ticker", "shares", "stop_loss", "buy_price", "cost_basis"])
-        print("Portfolio CSV is empty. Returning set amount of cash for creating portfolio.")
-         
-         
-        # 0) If override provided, validate and use it
-        if starting_equity_override is not None:
-            parsed = parse_starting_equity(starting_equity_override)
-            if parsed is None:
-                raise ValueError("Provided starting equity is invalid. Please pass a positive number.")
-            return portfolio, float(parsed)
-
-        # 1) No override: if stdin not interactive, exit gracefully (no hanging)
-        if not sys.stdin.isatty():
-            print("Error: No starting equity provided and stdin is not interactive. Provide --starting-equity or run interactively.")
-            sys.exit(2)
-
-        # 2) Interactive prompt until valid
-        while True:
-            raw = input("What would you like your starting cash amount to be? ").strip()
-            parsed = parse_starting_equity(raw)
-            if parsed is not None:
-                cash = float(parsed)
-                break
-            print("Invalid amount. Enter a positive number (commas, underscores, $ prefix allowed). Try again.")
-
+        print(f"Portfolio CSV is empty. Returning set amount of cash for creating portfolio (in {CURRENCY}).")
+        try:
+            cash = float(input(f"What would you like your starting cash amount to be (in {CURRENCY_SYMBOL})? "))
+        except ValueError:
+            raise ValueError(
+                "Cash could not be converted to float datatype. Please enter a valid number."
+            )
         return portfolio, cash
-
 
     non_total = df[df["Ticker"] != "TOTAL"].copy()
     non_total["Date"] = pd.to_datetime(non_total["Date"], format="mixed", errors="coerce")
@@ -1388,7 +1309,6 @@ def load_latest_portfolio_state(
     )
     latest_tickers.rename(
         columns={
-            "ISIN": "isin",
             "Cost Basis": "cost_basis",
             "Buy Price": "buy_price",
             "Shares": "shares",
@@ -1406,45 +1326,39 @@ def load_latest_portfolio_state(
     return latest_tickers, cash
 
 
-def main(data_dir: Path | None = None, starting_equity_override: Optional[Union[str, float, Decimal]] = None) -> None:
-    """Check versions, then run the trading script."""
+def main(data_dir: Path | None = None) -> None:
+    """Check versions, then run the trading script (EUR version)."""
     if data_dir is not None:
         set_data_dir(data_dir)
 
-    load_isin_mappings()
-
-    chatgpt_portfolio, cash = load_latest_portfolio_state(starting_equity_override=starting_equity_override)
+    chatgpt_portfolio, cash = load_latest_portfolio_state()
     chatgpt_portfolio, cash = process_portfolio(chatgpt_portfolio, cash)
     daily_results(chatgpt_portfolio, cash)
+
 
 if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", default=None, help="Optional data directory")
-    parser.add_argument("--asof", default=None, help="Treat this YYYY-MM-DD as 'today'")
-    parser.add_argument(
-        "--log-level",
-        default=None,   # default = None means no logging unless specified
-        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
-        help="Set the logging level (default: none)"
-    )
-    parser.add_argument("--starting-equity", "-s", default=None,
-                       help="Optional starting equity")
+    parser.add_argument("--asof", default=None, help="Treat this YYYY-MM-DD as 'today' (e.g., 2025-08-27)")
+    parser.add_argument("--log-level", default="INFO",
+                       choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+                       help="Set the logging level (default: INFO)")
     args = parser.parse_args()
 
-    # Configure logging only if requested
-    if args.log_level:
-        logging.basicConfig(
-            level=getattr(logging, args.log_level.upper()),
-            format="%(asctime)s - %(filename)s:%(lineno)d - %(levelname)s - %(message)s",
-            force=True  # ensure our config overrides any defaults
-        )
-        logging.getLogger("peewee").setLevel(logging.WARNING)
-        _log_initial_state()
-        logger.info("Script started with arguments: %s", vars(args))
+
+    # Configure logging level
+    logging.basicConfig(
+        level=getattr(logging, args.log_level.upper()),
+        format=' %(asctime)s - %(filename)s:%(lineno)d - %(levelname)s - %(message)s'
+    )
+
+    # Log initial global state and command-line arguments
+    _log_initial_state()
+    logger.info("Script started with arguments: %s", vars(args))
 
     if args.asof:
         set_asof(args.asof)
 
-    main(Path(args.data_dir) if args.data_dir else None, starting_equity_override=args.starting_equity)
+    main(Path(args.data_dir) if args.data_dir else None)
