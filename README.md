@@ -5,9 +5,11 @@ Welcome to the repo behind my 6-month live trading experiment where ChatGPT mana
    
 ## Repository Structure
 
-- **`trading_script.py`** - Main trading engine with portfolio management and stop-loss automation
+- **`trading_script.py`** - Main trading engine with portfolio management and stop-loss automation (USD version)
+- **`trading_script_eur.py`** - EUR version with foreign exchange rate conversion
+- **`backup_csvs.py`** - Utility to backup your CSV files before running trades
 - **`Scripts and CSV Files/`** - My personal portfolio (updates every trading day)
-- **`Start Your Own/`** - Template files and guide for starting your own experiment  
+- **`Start Your Own/`** - Template files and guide for starting your own experiment
 - **`Weekly Deep Research (MD|PDF)/`** - Research summaries and performance reports
 - **`Experiment Details/`** - Documentation, methodology, prompts, and Q&A
 
@@ -87,6 +89,9 @@ This project is an attempt to find out — with transparency, data, and a real b
 - **Robust Data Sources** - Yahoo Finance primary, Stooq fallback for reliability
 - **Automated Stop-Loss** - Automatic position management with configurable stop-losses
 - **Interactive Trading** - Market-on-Open (MOO) and limit order support
+- **Multi-Currency Support** - EUR version with real-time FX conversion (EUR/USD)
+- **ISIN Tracking** - European stock identification with ISIN mapping
+- **CSV Backup System** - Timestamped backups to preserve portfolio history
 - **Backtesting Support** - ASOF_DATE override for historical analysis
 - **Performance Analytics** - CAPM analysis, Sharpe/Sortino ratios, drawdown metrics
 - **Trade Logging** - Complete transparency with detailed execution logs
@@ -95,6 +100,57 @@ This project is an attempt to find out — with transparency, data, and a real b
 - Python  3.11+
 - Internet connection for market data
 - ~10MB storage for CSV data files
+
+## EUR Version Usage
+
+The EUR version (`trading_script_eur.py`) is designed for European traders who want to track their portfolio in euros.
+
+### Features
+- **Real-time FX conversion** - Fetches EUR/USD rates from Yahoo Finance
+- **EUR input/output** - All prices displayed and entered in EUR
+- **ISIN support** - Track European stocks with ISIN codes
+- **Dual price logging** - Records both EUR and USD prices for transparency
+
+### Running the EUR version
+
+```bash
+# Basic usage
+python trading_script_eur.py --data-dir "Start Your Own"
+
+# With starting equity for new portfolio
+python trading_script_eur.py --data-dir "Start Your Own" --starting-equity 10000
+
+# With debug logging
+python trading_script_eur.py --data-dir "Start Your Own" --log-level DEBUG
+```
+
+### Backing Up Your CSV Files
+
+Before running trades, it's recommended to backup your portfolio:
+
+```bash
+# Backup CSVs before trading
+python backup_csvs.py --data-dir "Start Your Own"
+
+# Then run your trading script
+python trading_script_eur.py --data-dir "Start Your Own"
+
+# Or combine both commands
+python backup_csvs.py --data-dir "Start Your Own" && python trading_script_eur.py --data-dir "Start Your Own"
+```
+
+**Backups are stored in:** `backups/YYYYMMDD_HHMMSS/`
+
+**To restore from backup:**
+```bash
+# List available backups
+ls backups/
+
+# Restore specific backup
+cp backups/20251005_143022/*.csv "Start Your Own/"
+```
+
+**Note:** The `backups/` directory is git-ignored, so your CSV files stay private and local.
 
 # Follow Along
 The experiment runs from June 2025 to December 2025.  
