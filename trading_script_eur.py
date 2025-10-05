@@ -143,6 +143,61 @@ def usd_to_eur(usd_amount: float, date: pd.Timestamp | None = None) -> float:
     return usd_amount * rate
 
 # ------------------------------
+# ISIN to Yahoo Finance ticker mapping
+# ------------------------------
+
+ISIN_TO_YAHOO: Dict[str, str] = {}
+
+def get_isin_mapping_file() -> Path:
+    """Get the path to the ISIN mapping JSON file."""
+    return DATA_DIR / "isin_mapping.json"
+
+def load_isin_mappings() -> None:
+    """Load ISIN→ticker mappings from JSON file on startup."""
+    global ISIN_TO_YAHOO
+    mapping_file = get_isin_mapping_file()
+
+    if mapping_file.exists():
+        logger.info("Reading JSON file: %s", mapping_file)
+        try:
+            with open(mapping_file, 'r', encoding='utf-8') as f:
+                loaded = json.load(f)
+                ISIN_TO_YAHOO.update(loaded)
+            logger.info("Successfully loaded %d ISIN mappings from %s", len(loaded), mapping_file)
+        except json.JSONDecodeError as e:
+            logger.warning("Failed to parse ISIN mapping file %s: %s", mapping_file, e)
+        except Exception as e:
+            logger.warning("Failed to load ISIN mappings from %s: %s", mapping_file, e)
+    else:
+        logger.info("No existing ISIN mapping file found at %s", mapping_file)
+
+def save_isin_mappings() -> None:
+    """Save current ISIN→ticker mappings to JSON file."""
+    mapping_file = get_isin_mapping_file()
+    logger.info("Writing JSON file: %s", mapping_file)
+    try:
+        with open(mapping_file, 'w', encoding='utf-8') as f:
+            json.dump(ISIN_TO_YAHOO, f, indent=2, ensure_ascii=False)
+        logger.info("Successfully saved %d ISIN mappings to %s", len(ISIN_TO_YAHOO), mapping_file)
+    except Exception as e:
+        logger.error("Failed to save ISIN mappings to %s: %s", mapping_file, e)
+
+def add_isin_mapping(isin: str, ticker: str) -> None:
+    """Add a new ISIN→ticker mapping and save immediately."""
+    isin = isin.strip().upper()
+    ticker = ticker.strip().upper()
+
+    ISIN_TO_YAHOO[isin] = ticker
+    save_isin_mappings()
+
+    logger.info("Added ISIN mapping: %s → %s", isin, ticker)
+    print(f"✓ Saved mapping: {isin} → {ticker}")
+
+def get_yahoo_ticker_from_isin(isin: str) -> str | None:
+    """Convert ISIN to Yahoo Finance ticker. Returns None if not found."""
+    return ISIN_TO_YAHOO.get(isin.strip().upper())
+
+# ------------------------------
 # Configuration helpers — benchmark tickers (tickers.json)
 # ------------------------------
 
@@ -486,7 +541,7 @@ def _ensure_df(portfolio: pd.DataFrame | dict[str, list[object]] | list[dict[str
         # Ensure proper columns exist even for empty DataFrames
         if df.empty:
             logger.debug("Creating empty portfolio DataFrame with proper column structure")
-            df = pd.DataFrame(columns=["ticker", "shares", "stop_loss", "buy_price", "cost_basis"])
+            df = pd.DataFrame(columns=["isin", "ticker", "shares", "stop_loss", "buy_price", "cost_basis"])
         return df
     raise TypeError("portfolio must be a DataFrame, dict, or list[dict]")
 
@@ -513,7 +568,23 @@ Would you like to log a manual trade? Enter 'b' for buy, 's' for sell, or press 
             ).strip().lower()
 
             if action == "b":
-                ticker = input("Enter ticker symbol: ").strip().upper()
+                # Ask for ISIN first
+                isin = input("Enter ISIN (e.g., US0378331005): ").strip().upper()
+
+                # Check if we have a mapping
+                ticker = get_yahoo_ticker_from_isin(isin)
+
+                if ticker is None:
+                    print(f"ISIN {isin} not found in mapping.")
+                    ticker = input("Enter Yahoo Finance ticker (e.g., AAPL): ").strip().upper()
+
+                    # Ask if they want to save this mapping
+                    save_mapping = input(f"Save mapping {isin} → {ticker}? (y/n): ").strip().lower()
+                    if save_mapping == 'y':
+                        add_isin_mapping(isin, ticker)
+                else:
+                    print(f"Using ticker: {ticker} (from ISIN {isin})")
+
                 order_type = input("Order type? 'm' = market-on-open, 'l' = limit: ").strip().lower()
 
                 try:
@@ -554,6 +625,7 @@ Would you like to log a manual trade? Enter 'b' for buy, 's' for sell, or press 
 
                     log = {
                         "Date": today_iso,
+                        "ISIN": isin,
                         "Ticker": ticker,
                         "Shares Bought": shares,
                         "Buy Price (EUR)": exec_price_eur,
@@ -580,6 +652,7 @@ Would you like to log a manual trade? Enter 'b' for buy, 's' for sell, or press 
                     rows = portfolio_df.loc[portfolio_df["ticker"].astype(str).str.upper() == ticker.upper()]
                     if rows.empty:
                         new_trade = {
+                            "isin": isin,
                             "ticker": ticker,
                             "shares": float(shares),
                             "stop_loss": float(stop_loss_eur),
@@ -601,6 +674,7 @@ Would you like to log a manual trade? Enter 'b' for buy, 's' for sell, or press 
                         portfolio_df.at[idx, "cost_basis"] = new_cost
                         portfolio_df.at[idx, "buy_price"] = avg_price
                         portfolio_df.at[idx, "stop_loss"] = float(stop_loss_eur)
+                        portfolio_df.at[idx, "isin"] = isin
 
                     cash -= notional
                     print(f"Manual BUY MOO for {ticker} filled at ${exec_price_usd:.2f} USD ({CURRENCY_SYMBOL}{exec_price_eur:.2f} EUR) ({fetch.source}).")
@@ -617,7 +691,7 @@ Would you like to log a manual trade? Enter 'b' for buy, 's' for sell, or press 
                         continue
 
                     cash, portfolio_df = log_manual_buy(
-                        buy_price_usd, shares, ticker, stop_loss_usd, cash, portfolio_df
+                        buy_price_usd, shares, ticker, stop_loss_usd, cash, portfolio_df, isin=isin
                     )
                     continue
                 else:
@@ -668,10 +742,13 @@ Would you like to log a manual trade? Enter 'b' for buy, 's' for sell, or press 
         fetch = download_price_data(ticker, start=s, end=e, auto_adjust=False, progress=False)
         data = fetch.df
 
+        # Get ISIN from stock row (works for both dict and Series)
+        isin_value = str(stock.get("isin", "")) if hasattr(stock, 'get') else (str(stock["isin"]) if "isin" in stock.index else "")
+
         if data.empty:
             print(f"No data for {ticker} (source={fetch.source}).")
             row = {
-                "Date": today_iso, "Ticker": ticker, "Shares": shares,
+                "Date": today_iso, "ISIN": isin_value, "Ticker": ticker, "Shares": shares,
                 "Buy Price": cost_eur, "Cost Basis": cost_basis, "Stop Loss": stop_eur,
                 "Current Price": "", "Total Value": "", "PnL": "",
                 "Action": "NO DATA", "Cash Balance": "", "Total Equity": "",
@@ -699,9 +776,9 @@ Would you like to log a manual trade? Enter 'b' for buy, 's' for sell, or press 
             pnl = round((exec_price - cost_eur) * shares, 2)
             action = "SELL - Stop Loss Triggered"
             cash += value
-            portfolio_df = log_sell(ticker, shares, exec_price, cost_eur, pnl, portfolio_df)
+            portfolio_df = log_sell(ticker, shares, exec_price, cost_eur, pnl, portfolio_df, isin=isin_value)
             row = {
-                "Date": today_iso, "Ticker": ticker, "Shares": shares,
+                "Date": today_iso, "ISIN": isin_value, "Ticker": ticker, "Shares": shares,
                 "Buy Price": cost_eur, "Cost Basis": cost_basis, "Stop Loss": stop_eur,
                 "Current Price": exec_price, "Total Value": value, "PnL": pnl,
                 "Action": action, "Cash Balance": "", "Total Equity": "",
@@ -714,7 +791,7 @@ Would you like to log a manual trade? Enter 'b' for buy, 's' for sell, or press 
             total_value += value
             total_pnl += pnl
             row = {
-                "Date": today_iso, "Ticker": ticker, "Shares": shares,
+                "Date": today_iso, "ISIN": isin_value, "Ticker": ticker, "Shares": shares,
                 "Buy Price": cost_eur, "Cost Basis": cost_basis, "Stop Loss": stop_eur,
                 "Current Price": price, "Total Value": value, "PnL": pnl,
                 "Action": action, "Cash Balance": "", "Total Equity": "",
@@ -723,7 +800,7 @@ Would you like to log a manual trade? Enter 'b' for buy, 's' for sell, or press 
         results.append(row)
 
     total_row = {
-        "Date": today_iso, "Ticker": "TOTAL", "Shares": "", "Buy Price": "",
+        "Date": today_iso, "ISIN": "", "Ticker": "TOTAL", "Shares": "", "Buy Price": "",
         "Cost Basis": "", "Stop Loss": "", "Current Price": "",
         "Total Value": round(total_value, 2), "PnL": round(total_pnl, 2),
         "Action": "", "Cash Balance": round(cash, 2),
@@ -758,10 +835,12 @@ def log_sell(
     cost: float,
     pnl: float,
     portfolio: pd.DataFrame,
+    isin: str = "",
 ) -> pd.DataFrame:
     today = check_weekend()
     log = {
         "Date": today,
+        "ISIN": isin,
         "Ticker": ticker,
         "Shares Sold": shares,
         "Sell Price (EUR)": price,
@@ -794,6 +873,7 @@ def log_manual_buy(
     stoploss_usd: float,
     cash: float,
     chatgpt_portfolio: pd.DataFrame,
+    isin: str | None = None,
     interactive: bool = True,
 ) -> tuple[float, pd.DataFrame]:
     today = check_weekend()
@@ -810,7 +890,7 @@ def log_manual_buy(
 
     if not isinstance(chatgpt_portfolio, pd.DataFrame) or chatgpt_portfolio.empty:
         chatgpt_portfolio = pd.DataFrame(
-            columns=["ticker", "shares", "stop_loss", "buy_price", "cost_basis"]
+            columns=["isin", "ticker", "shares", "stop_loss", "buy_price", "cost_basis"]
         )
 
     s, e = trading_day_window()
@@ -845,6 +925,7 @@ def log_manual_buy(
 
     log = {
         "Date": today,
+        "ISIN": isin or "",
         "Ticker": ticker,
         "Shares Bought": shares,
         "Buy Price (EUR)": exec_price_eur,
@@ -871,6 +952,7 @@ def log_manual_buy(
     if rows.empty:
         if chatgpt_portfolio.empty:
             chatgpt_portfolio = pd.DataFrame([{
+                "isin": isin,
                 "ticker": ticker,
                 "shares": float(shares),
                 "stop_loss": float(stoploss_eur),
@@ -880,6 +962,7 @@ def log_manual_buy(
         else:
             chatgpt_portfolio = pd.concat(
                 [chatgpt_portfolio, pd.DataFrame([{
+                    "isin": isin,
                     "ticker": ticker,
                     "shares": float(shares),
                     "stop_loss": float(stoploss_eur),
@@ -898,6 +981,7 @@ def log_manual_buy(
         chatgpt_portfolio.at[idx, "cost_basis"] = new_cost
         chatgpt_portfolio.at[idx, "buy_price"] = new_cost / new_shares if new_shares else 0.0
         chatgpt_portfolio.at[idx, "stop_loss"] = float(stoploss_eur)
+        chatgpt_portfolio.at[idx, "isin"] = isin
 
     cash -= cost_amt
     print(f"Manual BUY LIMIT for {ticker} filled at ${exec_price_usd:.2f} USD ({CURRENCY_SYMBOL}{exec_price_eur:.2f} EUR) ({fetch.source}).")
@@ -964,8 +1048,11 @@ If this is a mistake, enter 1, or hit Enter."""
     cost_basis = buy_price_eur * shares_sold
     pnl = exec_price_eur * shares_sold - cost_basis
 
+    # Get ISIN from portfolio if it exists
+    isin_value = str(ticker_row["isin"].item()) if "isin" in ticker_row.columns else ""
+
     log = {
-        "Date": today, "Ticker": ticker,
+        "Date": today, "ISIN": isin_value, "Ticker": ticker,
         "Shares Bought": "", "Buy Price (EUR)": "", "Buy Price (USD)": "",
         "Cost Basis": cost_basis, "PnL": pnl,
         "Reason": f"MANUAL SELL LIMIT - {reason}", "Shares Sold": shares_sold,
@@ -1277,7 +1364,7 @@ def load_latest_portfolio_state() -> tuple[pd.DataFrame | list[dict[str, Any]], 
 
     logger.info("Successfully read CSV file: %s", PORTFOLIO_CSV)
     if df.empty:
-        portfolio = pd.DataFrame(columns=["ticker", "shares", "stop_loss", "buy_price", "cost_basis"])
+        portfolio = pd.DataFrame(columns=["isin", "ticker", "shares", "stop_loss", "buy_price", "cost_basis"])
         print(f"Portfolio CSV is empty. Returning set amount of cash for creating portfolio (in {CURRENCY}).")
         try:
             cash = float(input(f"What would you like your starting cash amount to be (in {CURRENCY_SYMBOL})? "))
@@ -1309,6 +1396,7 @@ def load_latest_portfolio_state() -> tuple[pd.DataFrame | list[dict[str, Any]], 
     )
     latest_tickers.rename(
         columns={
+            "ISIN": "isin",
             "Cost Basis": "cost_basis",
             "Buy Price": "buy_price",
             "Shares": "shares",
@@ -1330,6 +1418,8 @@ def main(data_dir: Path | None = None) -> None:
     """Check versions, then run the trading script (EUR version)."""
     if data_dir is not None:
         set_data_dir(data_dir)
+
+    load_isin_mappings()
 
     chatgpt_portfolio, cash = load_latest_portfolio_state()
     chatgpt_portfolio, cash = process_portfolio(chatgpt_portfolio, cash)
