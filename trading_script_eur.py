@@ -1200,7 +1200,17 @@ def daily_results(chatgpt_portfolio: pd.DataFrame, cash: float) -> None:
         for r in rows:
             print(f"{str(r[0]):<{colw[0]}} {str(r[1]):>{colw[1]}} {str(r[2]):>{colw[2]}} {str(r[3]):>{colw[3]}}")
         print("\n[ Portfolio Snapshot ]")
-        print(chatgpt_portfolio)
+        # Create display copy with EUR labels
+        display_df = chatgpt_portfolio.copy()
+        display_df.rename(columns={
+            'isin': 'ISIN',
+            'ticker': 'Ticker',
+            'shares': 'Shares',
+            'buy_price': 'Buy Price (EUR)',
+            'stop_loss': 'Stop Loss (EUR)',
+            'cost_basis': 'Cost Basis (EUR)'
+        }, inplace=True)
+        print(display_df)
         print(f"Cash balance: {CURRENCY_SYMBOL}{cash:,.2f}")
         return
 
@@ -1230,7 +1240,17 @@ def daily_results(chatgpt_portfolio: pd.DataFrame, cash: float) -> None:
         for rrow in rows:
             print(f"{str(rrow[0]):<{colw[0]}} {str(rrow[1]):>{colw[1]}} {str(rrow[2]):>{colw[2]}} {str(rrow[3]):>{colw[3]}}")
         print("\n[ Portfolio Snapshot ]")
-        print(chatgpt_portfolio)
+        # Create display copy with EUR labels
+        display_df = chatgpt_portfolio.copy()
+        display_df.rename(columns={
+            'isin': 'ISIN',
+            'ticker': 'Ticker',
+            'shares': 'Shares',
+            'buy_price': 'Buy Price (EUR)',
+            'stop_loss': 'Stop Loss (EUR)',
+            'cost_basis': 'Cost Basis (EUR)'
+        }, inplace=True)
+        print(display_df)
         print(f"Cash balance: {CURRENCY_SYMBOL}{cash:,.2f}")
         print(f"Latest ChatGPT Equity: {CURRENCY_SYMBOL}{final_equity:,.2f}")
         if hasattr(mdd_date, "date") and not isinstance(mdd_date, (str, int)):
@@ -1385,7 +1405,17 @@ def daily_results(chatgpt_portfolio: pd.DataFrame, cash: float) -> None:
     print(f"{'Cash Balance:':32} {CURRENCY_SYMBOL}{cash:>14,.2f}")
 
     print("\n[ Holdings ]")
-    print(chatgpt_portfolio)
+    # Create display copy with EUR labels
+    display_df = chatgpt_portfolio.copy()
+    display_df.rename(columns={
+        'isin': 'ISIN',
+        'ticker': 'Ticker',
+        'shares': 'Shares',
+        'buy_price': 'Buy Price (EUR)',
+        'stop_loss': 'Stop Loss (EUR)',
+        'cost_basis': 'Cost Basis (EUR)'
+    }, inplace=True)
+    print(display_df)
 
     print("\n[ Your Instructions ]")
     print(
