@@ -115,13 +115,11 @@ def get_usd_eur_rate(date: pd.Timestamp | None = None) -> float:
         return _FX_CACHE[date_str]
 
     try:
-        # Fetch EUR/USD rate from Yahoo Finance
+        # Fetch EUR/USD rate from Yahoo Finance for the exact date
         logger.info("Fetching USD/EUR exchange rate for %s", date_str)
         print("Fetching USD/EUR exchange rate for", date_str)
-        start = date - pd.Timedelta(days=1)  # Look back a day to ensure we get data
-        end = date + pd.Timedelta(days=1)
 
-        fx_data = yf.download(FX_PAIR, start=start, end=end, progress=False)
+        fx_data = yf.download(FX_PAIR, start=date_str, end=date_str, progress=False)
 
         if fx_data.empty:
             logger.warning("No FX data available for %s", date_str)
