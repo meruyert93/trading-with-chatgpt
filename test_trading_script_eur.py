@@ -506,7 +506,7 @@ class TestPortfolioState:
     """Test portfolio state loading."""
 
     def test_load_latest_portfolio_state_empty(self, setup_test_env):
-        """Test loading state from empty CSV."""
+        """Test loading state from empty CSV with override."""
         # Create CSV with headers but no data
         empty_df = pd.DataFrame(columns=["Date", "ISIN", "Ticker", "Shares", "Buy Price",
                                          "Cost Basis", "Stop Loss", "Current Price",
@@ -514,8 +514,26 @@ class TestPortfolioState:
                                          "Total Equity"])
         empty_df.to_csv(ts.PORTFOLIO_CSV, index=False)
 
-        with patch('builtins.input', return_value='10000'):
-            portfolio, cash = ts.load_latest_portfolio_state()
+        # Test with starting equity override
+        portfolio, cash = ts.load_latest_portfolio_state(starting_equity_override=10000.0)
+
+        assert isinstance(portfolio, pd.DataFrame)
+        assert portfolio.empty
+        assert cash == 10000.0
+
+    def test_load_latest_portfolio_state_empty_interactive(self, setup_test_env):
+        """Test loading state from empty CSV with interactive input."""
+        # Create CSV with headers but no data
+        empty_df = pd.DataFrame(columns=["Date", "ISIN", "Ticker", "Shares", "Buy Price",
+                                         "Cost Basis", "Stop Loss", "Current Price",
+                                         "Total Value", "PnL", "Action", "Cash Balance",
+                                         "Total Equity"])
+        empty_df.to_csv(ts.PORTFOLIO_CSV, index=False)
+
+        # Mock stdin as interactive and provide input
+        with patch('sys.stdin.isatty', return_value=True):
+            with patch('builtins.input', return_value='10000'):
+                portfolio, cash = ts.load_latest_portfolio_state()
 
         assert isinstance(portfolio, pd.DataFrame)
         assert portfolio.empty

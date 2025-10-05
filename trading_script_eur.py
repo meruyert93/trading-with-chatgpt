@@ -16,7 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, cast, Dict, List, Optional
+from typing import Any, cast, Dict, List, Optional, Union
 import os
 import warnings
 
@@ -25,6 +25,10 @@ import pandas as pd
 import yfinance as yf
 import json
 import logging
+
+from decimal import Decimal, InvalidOperation
+import re
+import sys
 
 # Optional pandas-datareader import for Stooq access
 try:
@@ -142,6 +146,38 @@ def usd_to_eur(usd_amount: float, date: pd.Timestamp | None = None) -> float:
     """Convert USD amount to EUR using the exchange rate for the given date."""
     rate = get_usd_eur_rate(date)
     return usd_amount * rate
+
+# ------------------------------
+# Equity parsing helper (CLI override)
+# ------------------------------
+def _normalize_number_string(s: str) -> str:
+    """Remove commas/underscores/spaces and optional leading $ or €; preserve scientific notation."""
+    s = str(s).strip()
+    if s.startswith("$") or s.startswith("€"):
+        s = s[1:]
+    # remove commas, underscores, spaces
+    s = re.sub(r"[,_\s]", "", s)
+    return s
+
+def parse_starting_equity(s: Union[str, float, Decimal]) -> Optional[Decimal]:
+    """Return Decimal if s represents a positive number, otherwise None."""
+    if isinstance(s, (float, Decimal)):
+        try:
+            d = Decimal(str(s))
+        except Exception:
+            return None
+    else:
+        try:
+            norm = _normalize_number_string(str(s))
+            if norm == "":
+                return None
+            d = Decimal(norm)
+        except (InvalidOperation, ValueError):
+            return None
+    if d <= 0:
+        return None
+    return d
+
 
 # ------------------------------
 # ISIN to Yahoo Finance ticker mapping
@@ -1368,8 +1404,16 @@ def daily_results(chatgpt_portfolio: pd.DataFrame, cash: float) -> None:
 # Orchestration
 # ------------------------------
 
-def load_latest_portfolio_state() -> tuple[pd.DataFrame | list[dict[str, Any]], float]:
-    """Load the most recent portfolio snapshot and cash balance from global PORTFOLIO_CSV."""
+def load_latest_portfolio_state(
+    starting_equity_override: Optional[Union[str, float, Decimal]] = None,
+) -> tuple[pd.DataFrame | list[dict[str, Any]], float]:
+    """Load the most recent portfolio snapshot and cash balance from global PORTFOLIO_CSV.
+
+     If the portfolio CSV is empty, this function will:
+      - Use `starting_equity_override` if provided (validated), or
+      - Prompt interactively for a starting cash amount (if stdin is interactive), or
+      - Exit with code 2 if stdin is not interactive and no override provided
+    """
     logger.info("Reading CSV file: %s", PORTFOLIO_CSV)
     try:
         df = pd.read_csv(PORTFOLIO_CSV)
@@ -1384,12 +1428,29 @@ def load_latest_portfolio_state() -> tuple[pd.DataFrame | list[dict[str, Any]], 
     if df.empty:
         portfolio = pd.DataFrame(columns=["isin", "ticker", "shares", "stop_loss", "buy_price", "cost_basis"])
         print(f"Portfolio CSV is empty. Returning set amount of cash for creating portfolio (in {CURRENCY}).")
-        try:
-            cash = float(input(f"What would you like your starting cash amount to be (in {CURRENCY_SYMBOL})? "))
-        except ValueError:
-            raise ValueError(
-                "Cash could not be converted to float datatype. Please enter a valid number."
-            )
+
+
+        # 0) If override provided, validate and use it
+        if starting_equity_override is not None:
+            parsed = parse_starting_equity(starting_equity_override)
+            if parsed is None:
+                raise ValueError("Provided starting equity is invalid. Please pass a positive number.")
+            return portfolio, float(parsed)
+
+        # 1) No override: if stdin not interactive, exit gracefully (no hanging)
+        if not sys.stdin.isatty():
+            print(f"Error: No starting equity provided and stdin is not interactive. Provide --starting-equity or run interactively.")
+            sys.exit(2)
+
+        # 2) Interactive prompt until valid
+        while True:
+            raw = input(f"What would you like your starting cash amount to be (in {CURRENCY_SYMBOL})? ").strip()
+            parsed = parse_starting_equity(raw)
+            if parsed is not None:
+                cash = float(parsed)
+                break
+            print(f"Invalid amount. Enter a positive number (commas, underscores, {CURRENCY_SYMBOL} prefix allowed). Try again.")
+
         return portfolio, cash
 
     non_total = df[df["Ticker"] != "TOTAL"].copy()
@@ -1432,14 +1493,14 @@ def load_latest_portfolio_state() -> tuple[pd.DataFrame | list[dict[str, Any]], 
     return latest_tickers, cash
 
 
-def main(data_dir: Path | None = None) -> None:
+def main(data_dir: Path | None = None, starting_equity_override: Optional[Union[str, float, Decimal]] = None) -> None:
     """Check versions, then run the trading script (EUR version)."""
     if data_dir is not None:
         set_data_dir(data_dir)
 
     load_isin_mappings()
 
-    chatgpt_portfolio, cash = load_latest_portfolio_state()
+    chatgpt_portfolio, cash = load_latest_portfolio_state(starting_equity_override)
     chatgpt_portfolio, cash = process_portfolio(chatgpt_portfolio, cash)
     daily_results(chatgpt_portfolio, cash)
 
@@ -1450,6 +1511,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", default=None, help="Optional data directory")
     parser.add_argument("--asof", default=None, help="Treat this YYYY-MM-DD as 'today' (e.g., 2025-08-27)")
+    parser.add_argument("--starting-equity", default=None, type=str,
+                       help="Starting cash amount (if portfolio is empty). Supports formats like '10000', '10,000', '€10000'")
     parser.add_argument("--log-level", default="INFO",
                        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
                        help="Set the logging level (default: INFO)")
@@ -1469,4 +1532,4 @@ if __name__ == "__main__":
     if args.asof:
         set_asof(args.asof)
 
-    main(Path(args.data_dir) if args.data_dir else None)
+    main(Path(args.data_dir) if args.data_dir else None, args.starting_equity)
