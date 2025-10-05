@@ -1189,6 +1189,10 @@ def daily_results(chatgpt_portfolio: pd.DataFrame, cash: float) -> None:
     today = check_weekend()
     today_ts = last_trading_date()
 
+    # Get FX rate for the day to display in report
+    usd_eur_rate = usd_to_eur(1.0, today_ts)
+    eur_usd_rate = 1.0 / usd_eur_rate
+
     rows: list[list[str]] = []
     header = ["Ticker", "Close (EUR)", "% Chg", "Volume"]
 
@@ -1229,6 +1233,7 @@ def daily_results(chatgpt_portfolio: pd.DataFrame, cash: float) -> None:
     if totals.empty:
         print("\n" + "=" * 64)
         print(f"Daily Results — {today} (EUR)")
+        print(f"EUR/USD Rate: {eur_usd_rate:.4f}  |  USD/EUR Rate: {usd_eur_rate:.4f}")
         print("=" * 64)
         print("\n[ Price & Volume ]")
         colw = [10, 14, 9, 15]
@@ -1269,6 +1274,7 @@ def daily_results(chatgpt_portfolio: pd.DataFrame, cash: float) -> None:
     if n_days < 2:
         print("\n" + "=" * 64)
         print(f"Daily Results — {today} (EUR)")
+        print(f"EUR/USD Rate: {eur_usd_rate:.4f}  |  USD/EUR Rate: {usd_eur_rate:.4f}")
         print("=" * 64)
         print("\n[ Price & Volume ]")
         colw = [10, 14, 9, 15]
@@ -1394,6 +1400,7 @@ def daily_results(chatgpt_portfolio: pd.DataFrame, cash: float) -> None:
     # -------- Pretty Printing --------
     print("\n" + "=" * 64)
     print(f"Daily Results — {today} (EUR)")
+    print(f"EUR/USD Rate: {eur_usd_rate:.4f}  |  USD/EUR Rate: {usd_eur_rate:.4f}")
     print("=" * 64)
 
     # Price & Volume table
