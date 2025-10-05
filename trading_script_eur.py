@@ -113,17 +113,18 @@ def get_usd_eur_rate(date: pd.Timestamp | None = None) -> float:
     try:
         # Fetch EUR/USD rate from Yahoo Finance
         logger.info("Fetching USD/EUR exchange rate for %s", date_str)
-        start = date - pd.Timedelta(days=7)  # Look back a week to ensure we get data
+        start = date - pd.Timedelta(days=1)  # Look back a day to ensure we get data
         end = date + pd.Timedelta(days=1)
 
         fx_data = yf.download(FX_PAIR, start=start, end=end, progress=False)
 
         if fx_data.empty:
             logger.warning("No FX data available for %s, using default rate 0.92", date_str)
-            return 0.92  # Fallback rate
+            return 0.92  # Fallback rate if no data
 
         # Get the close price for the date (EUR/USD rate)
         eur_usd_rate = float(fx_data['Close'].iloc[-1])
+        logger.info("Fetched EUR/USD rate for %s: %.4f", date_str, eur_usd_rate)
 
         # Convert to USD/EUR rate (inverse)
         usd_eur_rate = 1.0 / eur_usd_rate
@@ -564,7 +565,7 @@ def process_portfolio(
             print(portfolio_df)
             action = input(
                 f""" You have {CURRENCY_SYMBOL}{cash:.2f} in cash.
-Would you like to log a manual trade? Enter 'b' for buy, 's' for sell, or press Enter to continue: """
+                    Would you like to log a manual trade? Enter 'b' for buy, 's' for sell, or press Enter to continue: """
             ).strip().lower()
 
             if action == "b":
@@ -597,8 +598,8 @@ Would you like to log a manual trade? Enter 'b' for buy, 's' for sell, or press 
 
                 if order_type == "m":
                     try:
-                        stop_loss_usd = float(input("Enter stop loss in USD (or 0 to skip): "))
-                        if stop_loss_usd < 0:
+                        stop_loss_eur = float(input("Enter stop loss in EUR (or 0 to skip): "))
+                        if stop_loss_eur < 0:
                             raise ValueError
                     except ValueError:
                         print("Invalid stop loss. Buy cancelled.")
@@ -616,7 +617,6 @@ Would you like to log a manual trade? Enter 'b' for buy, 's' for sell, or press 
 
                     # Convert to EUR
                     exec_price_eur = usd_to_eur(exec_price_usd, today_ts)
-                    stop_loss_eur = usd_to_eur(stop_loss_usd, today_ts) if stop_loss_usd > 0 else 0.0
 
                     notional = exec_price_eur * shares
                     if notional > cash:
@@ -682,16 +682,16 @@ Would you like to log a manual trade? Enter 'b' for buy, 's' for sell, or press 
 
                 elif order_type == "l":
                     try:
-                        buy_price_usd = float(input("Enter buy LIMIT price in USD: "))
-                        stop_loss_usd = float(input("Enter stop loss in USD (or 0 to skip): "))
-                        if buy_price_usd <= 0 or stop_loss_usd < 0:
+                        buy_price_eur = float(input("Enter buy LIMIT price in EUR: "))
+                        stop_loss_eur = float(input("Enter stop loss in EUR (or 0 to skip): "))
+                        if buy_price_eur <= 0 or stop_loss_eur < 0:
                             raise ValueError
                     except ValueError:
                         print("Invalid input. Limit buy cancelled.")
                         continue
 
                     cash, portfolio_df = log_manual_buy(
-                        buy_price_usd, shares, ticker, stop_loss_usd, cash, portfolio_df, isin=isin
+                        buy_price_eur, shares, ticker, stop_loss_eur, cash, portfolio_df, isin=isin
                     )
                     continue
                 else:
@@ -704,27 +704,28 @@ Would you like to log a manual trade? Enter 'b' for buy, 's' for sell, or press 
                     sell_order_type = input("Order type? 'm' = market-on-open, 'l' = limit: ").strip().lower()
                     shares = float(input("Enter number of shares to sell: "))
                     if sell_order_type == 'l':
-                        sell_price_usd = float(input("Enter sell LIMIT price in USD: "))
+                        sell_price_eur = float(input("Enter sell LIMIT price in EUR: "))
                     elif sell_order_type == 'm':
-                        # Get current price
+                        # Get current price in USD and convert to EUR
                         s, e = trading_day_window()
                         fetch = download_price_data(ticker, start=s, end=e, auto_adjust=False, progress=False)
                         if not fetch.df.empty:
-                            sell_price_usd = float(fetch.df["Open"].iloc[-1]) if "Open" in fetch.df else float(fetch.df["Close"].iloc[-1])
+                            price_usd = float(fetch.df["Open"].iloc[-1]) if "Open" in fetch.df else float(fetch.df["Close"].iloc[-1])
+                            sell_price_eur = usd_to_eur(price_usd, today_ts)
                         else:
                             print(f"Cannot get price for {ticker}")
                             continue
                     else:
                         print("Unknown order type. Use 'm' or 'l'.")
                         continue
-                    if shares <= 0 or sell_price_usd <= 0:
+                    if shares <= 0 or sell_price_eur <= 0:
                         raise ValueError
                 except ValueError:
                     print("Invalid input. Manual sell cancelled.")
                     continue
 
                 cash, portfolio_df = log_manual_sell(
-                    sell_price_usd, shares, ticker, cash, portfolio_df
+                    sell_price_eur, shares, ticker, cash, portfolio_df
                 )
                 continue
 
@@ -867,10 +868,10 @@ def log_sell(
     return portfolio
 
 def log_manual_buy(
-    buy_price_usd: float,
+    buy_price_eur: float,
     shares: float,
     ticker: str,
-    stoploss_usd: float,
+    stoploss_eur: float,
     cash: float,
     chatgpt_portfolio: pd.DataFrame,
     isin: str | None = None,
@@ -881,7 +882,7 @@ def log_manual_buy(
 
     if interactive:
         check = input(
-            f"You are placing a BUY LIMIT for {shares} {ticker} at ${buy_price_usd:.2f} USD.\n"
+            f"You are placing a BUY LIMIT for {shares} {ticker} at €{buy_price_eur:.2f} EUR.\n"
             f"If this is a mistake, type '1' or, just hit Enter: "
         )
         if check == "1":
@@ -900,23 +901,31 @@ def log_manual_buy(
         print(f"Manual buy for {ticker} failed: no market data available (source={fetch.source}).")
         return cash, chatgpt_portfolio
 
-    o_usd = float(data.get("Open", [np.nan])[-1])
+    # Get USD prices from market data
+    o_usd = float(data["Open"].iloc[-1]) if "Open" in data else np.nan
     h_usd = float(data["High"].iloc[-1])
     l_usd = float(data["Low"].iloc[-1])
+    c_usd = float(data["Close"].iloc[-1])
+
     if np.isnan(o_usd):
-        o_usd = float(data["Close"].iloc[-1])
+        o_usd = c_usd
 
-    if o_usd <= buy_price_usd:
+    # Convert USD prices to EUR for comparison with user's EUR limit
+    o_eur = usd_to_eur(o_usd, today_ts)
+    h_eur = usd_to_eur(h_usd, today_ts)
+    l_eur = usd_to_eur(l_usd, today_ts)
+
+    # Check if limit order would be filled (in EUR)
+    if o_eur <= buy_price_eur:
+        exec_price_eur = o_eur
         exec_price_usd = o_usd
-    elif l_usd <= buy_price_usd:
-        exec_price_usd = buy_price_usd
+    elif l_eur <= buy_price_eur:
+        exec_price_eur = buy_price_eur
+        # Calculate equivalent USD price
+        exec_price_usd = buy_price_eur / usd_to_eur(1.0, today_ts)
     else:
-        print(f"Buy limit ${buy_price_usd:.2f} USD for {ticker} not reached today (range ${l_usd:.2f}-${h_usd:.2f} USD). Order not filled.")
+        print(f"Buy limit €{buy_price_eur:.2f} EUR for {ticker} not reached today (range €{l_eur:.2f}-€{h_eur:.2f} EUR). Order not filled.")
         return cash, chatgpt_portfolio
-
-    # Convert to EUR
-    exec_price_eur = usd_to_eur(exec_price_usd, today_ts)
-    stoploss_eur = usd_to_eur(stoploss_usd, today_ts) if stoploss_usd > 0 else 0.0
 
     cost_amt = exec_price_eur * shares
     if cost_amt > cash:
@@ -988,7 +997,7 @@ def log_manual_buy(
     return cash, chatgpt_portfolio
 
 def log_manual_sell(
-    sell_price_usd: float,
+    sell_price_eur: float,
     shares_sold: float,
     ticker: str,
     cash: float,
@@ -1001,7 +1010,7 @@ def log_manual_sell(
 
     if interactive:
         reason = input(
-            f"""You are placing a SELL LIMIT for {shares_sold} {ticker} at ${sell_price_usd:.2f} USD.
+            f"""You are placing a SELL LIMIT for {shares_sold} {ticker} at €{sell_price_eur:.2f} EUR.
 If this is a mistake, enter 1, or hit Enter."""
         )
     if reason == "1":
@@ -1027,22 +1036,31 @@ If this is a mistake, enter 1, or hit Enter."""
         print(f"Manual sell for {ticker} failed: no market data available (source={fetch.source}).")
         return cash, chatgpt_portfolio
 
+    # Get USD prices from market data
     o_usd = float(data["Open"].iloc[-1]) if "Open" in data else np.nan
     h_usd = float(data["High"].iloc[-1])
     l_usd = float(data["Low"].iloc[-1])
+    c_usd = float(data["Close"].iloc[-1])
+
     if np.isnan(o_usd):
-        o_usd = float(data["Close"].iloc[-1])
+        o_usd = c_usd
 
-    if o_usd >= sell_price_usd:
+    # Convert USD prices to EUR for comparison with user's EUR limit
+    o_eur = usd_to_eur(o_usd, today_ts)
+    h_eur = usd_to_eur(h_usd, today_ts)
+    l_eur = usd_to_eur(l_usd, today_ts)
+
+    # Check if limit order would be filled (in EUR)
+    if o_eur >= sell_price_eur:
+        exec_price_eur = o_eur
         exec_price_usd = o_usd
-    elif h_usd >= sell_price_usd:
-        exec_price_usd = sell_price_usd
+    elif h_eur >= sell_price_eur:
+        exec_price_eur = sell_price_eur
+        # Calculate equivalent USD price
+        exec_price_usd = sell_price_eur / usd_to_eur(1.0, today_ts)
     else:
-        print(f"Sell limit ${sell_price_usd:.2f} USD for {ticker} not reached today (range ${l_usd:.2f}-${h_usd:.2f} USD). Order not filled.")
+        print(f"Sell limit €{sell_price_eur:.2f} EUR for {ticker} not reached today (range €{l_eur:.2f}-€{h_eur:.2f} EUR). Order not filled.")
         return cash, chatgpt_portfolio
-
-    # Convert to EUR
-    exec_price_eur = usd_to_eur(exec_price_usd, today_ts)
 
     buy_price_eur = float(ticker_row["buy_price"].item())
     cost_basis = buy_price_eur * shares_sold
@@ -1340,7 +1358,7 @@ def daily_results(chatgpt_portfolio: pd.DataFrame, cash: float) -> None:
         "If you do not make a clear indication to change positions IMMEDIATELY after this message, the portfolio remains unchanged for tomorrow.\n"
         "You are encouraged to use the internet to check current prices (and related up-to-date info) for potential buys.\n"
         "\n"
-        "NOTE: All prices displayed are in EUR. When providing recommendations, please specify prices in USD as that's what Trade Republic uses for US stocks.\n"
+        "NOTE: All prices displayed are in EUR. When providing recommendations, please specify prices in EUR as that's what European stocks use.\n"
         "\n"
         "*Paste everything above into ChatGPT*"
     )

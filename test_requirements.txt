@@ -1,0 +1,4 @@
+# Test requirements for trading_script_eur.py
+pytest>=7.4.0
+pytest-cov>=4.1.0
+pytest-mock>=3.11.1
