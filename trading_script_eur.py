@@ -42,6 +42,9 @@ CURRENCY = "EUR"
 CURRENCY_SYMBOL = "€"
 FX_PAIR = "EURUSD=X"  # Yahoo Finance ticker for EUR/USD rate
 
+# Trade fee (default €1.0 for Trade Republic)
+TRADE_FEE_EUR = 1.0
+
 # Cache for FX rate (date -> rate)
 _FX_CACHE: Dict[str, float] = {}
 
@@ -692,8 +695,9 @@ def process_portfolio(
                     exec_price_eur = usd_to_eur(exec_price_usd, today_ts)
 
                     notional = exec_price_eur * shares
-                    if notional > cash:
-                        print(f"MOO buy for {ticker} failed: cost {CURRENCY_SYMBOL}{notional:.2f} exceeds cash {CURRENCY_SYMBOL}{cash:.2f}.")
+                    total_cost_with_fee = notional + TRADE_FEE_EUR
+                    if total_cost_with_fee > cash:
+                        print(f"MOO buy for {ticker} failed: cost {CURRENCY_SYMBOL}{notional:.2f} + fee {CURRENCY_SYMBOL}{TRADE_FEE_EUR:.2f} = {CURRENCY_SYMBOL}{total_cost_with_fee:.2f} exceeds cash {CURRENCY_SYMBOL}{cash:.2f}.")
                         continue
 
                     log = {
@@ -749,8 +753,11 @@ def process_portfolio(
                         portfolio_df.at[idx, "stop_loss"] = float(stop_loss_eur)
                         portfolio_df.at[idx, "isin"] = isin
 
-                    cash -= notional
-                    print(f"Manual BUY MOO for {ticker} filled at ${exec_price_usd:.2f} USD ({CURRENCY_SYMBOL}{exec_price_eur:.2f} EUR) ({fetch.source}).")
+                    cash -= total_cost_with_fee
+                    if TRADE_FEE_EUR > 0:
+                        print(f"Manual BUY MOO for {ticker} filled at ${exec_price_usd:.2f} USD ({CURRENCY_SYMBOL}{exec_price_eur:.2f} EUR) ({fetch.source}). Trade fee: {CURRENCY_SYMBOL}{TRADE_FEE_EUR:.2f}")
+                    else:
+                        print(f"Manual BUY MOO for {ticker} filled at ${exec_price_usd:.2f} USD ({CURRENCY_SYMBOL}{exec_price_eur:.2f} EUR) ({fetch.source}).")
                     continue
 
                 elif order_type == "l":
@@ -849,7 +856,9 @@ def process_portfolio(
             value = round(exec_price * shares, 2)
             pnl = round((exec_price - cost_eur) * shares, 2)
             action = "SELL - Stop Loss Triggered"
-            cash += value
+            cash += value - TRADE_FEE_EUR
+            if TRADE_FEE_EUR > 0:
+                print(f"Stop-loss triggered for {ticker}. Trade fee deducted: {CURRENCY_SYMBOL}{TRADE_FEE_EUR:.2f}")
             portfolio_df = log_sell(ticker, shares, exec_price, cost_eur, pnl, portfolio_df, isin=isin_value)
             row = {
                 "Date": today_iso, "ISIN": isin_value, "Ticker": ticker, "Shares": shares,
@@ -1001,8 +1010,9 @@ def log_manual_buy(
         return cash, chatgpt_portfolio
 
     cost_amt = exec_price_eur * shares
-    if cost_amt > cash:
-        print(f"Manual buy for {ticker} failed: cost {CURRENCY_SYMBOL}{cost_amt:.2f} exceeds cash balance {CURRENCY_SYMBOL}{cash:.2f}.")
+    total_cost_with_fee = cost_amt + TRADE_FEE_EUR
+    if total_cost_with_fee > cash:
+        print(f"Manual buy for {ticker} failed: cost {CURRENCY_SYMBOL}{cost_amt:.2f} + fee {CURRENCY_SYMBOL}{TRADE_FEE_EUR:.2f} = {CURRENCY_SYMBOL}{total_cost_with_fee:.2f} exceeds cash balance {CURRENCY_SYMBOL}{cash:.2f}.")
         return cash, chatgpt_portfolio
 
     log = {
@@ -1065,8 +1075,11 @@ def log_manual_buy(
         chatgpt_portfolio.at[idx, "stop_loss"] = float(stoploss_eur)
         chatgpt_portfolio.at[idx, "isin"] = isin
 
-    cash -= cost_amt
-    print(f"Manual BUY LIMIT for {ticker} filled at ${exec_price_usd:.2f} USD ({CURRENCY_SYMBOL}{exec_price_eur:.2f} EUR) ({fetch.source}).")
+    cash -= total_cost_with_fee
+    if TRADE_FEE_EUR > 0:
+        print(f"Manual BUY LIMIT for {ticker} filled at ${exec_price_usd:.2f} USD ({CURRENCY_SYMBOL}{exec_price_eur:.2f} EUR) ({fetch.source}). Trade fee: {CURRENCY_SYMBOL}{TRADE_FEE_EUR:.2f}")
+    else:
+        print(f"Manual BUY LIMIT for {ticker} filled at ${exec_price_usd:.2f} USD ({CURRENCY_SYMBOL}{exec_price_eur:.2f} EUR) ({fetch.source}).")
     return cash, chatgpt_portfolio
 
 def log_manual_sell(
@@ -1173,8 +1186,11 @@ If this is a mistake, enter 1, or hit Enter."""
             chatgpt_portfolio.at[row_index, "shares"] * chatgpt_portfolio.at[row_index, "buy_price"]
         )
 
-    cash += shares_sold * exec_price_eur
-    print(f"Manual SELL LIMIT for {ticker} filled at ${exec_price_usd:.2f} USD ({CURRENCY_SYMBOL}{exec_price_eur:.2f} EUR) ({fetch.source}).")
+    cash += shares_sold * exec_price_eur - TRADE_FEE_EUR
+    if TRADE_FEE_EUR > 0:
+        print(f"Manual SELL LIMIT for {ticker} filled at ${exec_price_usd:.2f} USD ({CURRENCY_SYMBOL}{exec_price_eur:.2f} EUR) ({fetch.source}). Trade fee: {CURRENCY_SYMBOL}{TRADE_FEE_EUR:.2f}")
+    else:
+        print(f"Manual SELL LIMIT for {ticker} filled at ${exec_price_usd:.2f} USD ({CURRENCY_SYMBOL}{exec_price_eur:.2f} EUR) ({fetch.source}).")
     return cash, chatgpt_portfolio
 
 
@@ -1234,6 +1250,8 @@ def daily_results(chatgpt_portfolio: pd.DataFrame, cash: float) -> None:
         print("\n" + "=" * 64)
         print(f"Daily Results — {today} (EUR)")
         print(f"EUR/USD Rate: {eur_usd_rate:.4f}  |  USD/EUR Rate: {usd_eur_rate:.4f}")
+        if TRADE_FEE_EUR > 0:
+            print(f"Trade Fee: {CURRENCY_SYMBOL}{TRADE_FEE_EUR:.2f} per trade")
         print("=" * 64)
         print("\n[ Price & Volume ]")
         colw = [10, 14, 9, 15]
@@ -1275,6 +1293,8 @@ def daily_results(chatgpt_portfolio: pd.DataFrame, cash: float) -> None:
         print("\n" + "=" * 64)
         print(f"Daily Results — {today} (EUR)")
         print(f"EUR/USD Rate: {eur_usd_rate:.4f}  |  USD/EUR Rate: {usd_eur_rate:.4f}")
+        if TRADE_FEE_EUR > 0:
+            print(f"Trade Fee: {CURRENCY_SYMBOL}{TRADE_FEE_EUR:.2f} per trade")
         print("=" * 64)
         print("\n[ Price & Volume ]")
         colw = [10, 14, 9, 15]
@@ -1401,6 +1421,8 @@ def daily_results(chatgpt_portfolio: pd.DataFrame, cash: float) -> None:
     print("\n" + "=" * 64)
     print(f"Daily Results — {today} (EUR)")
     print(f"EUR/USD Rate: {eur_usd_rate:.4f}  |  USD/EUR Rate: {usd_eur_rate:.4f}")
+    if TRADE_FEE_EUR > 0:
+        print(f"Trade Fee: {CURRENCY_SYMBOL}{TRADE_FEE_EUR:.2f} per trade")
     print("=" * 64)
 
     # Price & Volume table
@@ -1590,6 +1612,8 @@ if __name__ == "__main__":
     parser.add_argument("--log-level", default="INFO",
                        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
                        help="Set the logging level (default: INFO)")
+    parser.add_argument("--no-fees", action="store_true",
+                       help="Disable trade fees (default: €1 fee per trade for Trade Republic)")
     args = parser.parse_args()
 
 
@@ -1598,6 +1622,12 @@ if __name__ == "__main__":
         level=getattr(logging, args.log_level.upper()),
         format=' %(asctime)s - %(filename)s:%(lineno)d - %(levelname)s - %(message)s'
     )
+
+    # Disable fees if flag is enabled
+    if args.no_fees:
+        TRADE_FEE_EUR = 0.0
+        logger.info("Trade fees disabled")
+        print("Trade fees disabled (€0 per trade)")
 
     # Log initial global state and command-line arguments
     _log_initial_state()

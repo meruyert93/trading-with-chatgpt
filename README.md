@@ -110,18 +110,25 @@ The EUR version (`trading_script_eur.py`) is designed for European traders who w
 - **EUR input/output** - All prices displayed and entered in EUR
 - **ISIN support** - Track European stocks with ISIN codes
 - **Dual price logging** - Records both EUR and USD prices for transparency
+- **Trade Republic fees** - €1 fee per trade (default, use `--no-fees` to disable)
 
 ### Running the EUR version
 
 ```bash
-# Basic usage
+# Basic usage (includes €1 fee per trade by default)
 python trading_script_eur.py --data-dir "Start Your Own"
 
 # With starting equity for new portfolio
 python trading_script_eur.py --data-dir "Start Your Own" --starting-equity 10000
 
+# Disable trade fees (no fees)
+python trading_script_eur.py --data-dir "Start Your Own" --no-fees
+
 # With debug logging
 python trading_script_eur.py --data-dir "Start Your Own" --log-level DEBUG
+
+# Combined flags
+python trading_script_eur.py --data-dir "Start Your Own" --starting-equity 10000 --log-level DEBUG
 ```
 
 ### Backing Up Your CSV Files

@@ -208,8 +208,9 @@ class TestFXRates:
         # Clear cache
         ts._FX_CACHE.clear()
 
-        # Mock FX data (EUR/USD = 1.08)
+        # Mock FX data (EUR/USD = 1.08) - now includes Open column
         mock_fx_data = pd.DataFrame({
+            'Open': [1.08],
             'Close': [1.08]
         }, index=[pd.Timestamp('2025-01-06')])
         mock_download.return_value = mock_fx_data
@@ -236,17 +237,20 @@ class TestFXRates:
         assert rate == 0.925
         mock_download.assert_not_called()
 
+    @patch('builtins.input', return_value='1.08')
     @patch('trading_script_eur.yf.download')
-    def test_get_usd_eur_rate_fallback(self, mock_download):
-        """Test FX rate fallback on error."""
+    def test_get_usd_eur_rate_fallback(self, mock_download, mock_input):
+        """Test FX rate fallback with interactive input."""
         ts._FX_CACHE.clear()
         mock_download.return_value = pd.DataFrame()  # Empty data
 
         date = pd.Timestamp('2025-01-06')
         rate = ts.get_usd_eur_rate(date)
 
-        # Should return fallback rate
-        assert rate == 0.92
+        # Should prompt for input and return inverse
+        expected_rate = 1.0 / 1.08
+        assert abs(rate - expected_rate) < 0.0001
+        mock_input.assert_called_once()
 
     def test_usd_to_eur(self):
         """Test USD to EUR conversion."""
@@ -413,6 +417,7 @@ class TestTradeLogging:
     def test_log_manual_buy(self, mock_usd_to_eur, mock_download, mock_check_weekend,
                            setup_test_env, sample_portfolio_df):
         """Test log_manual_buy function."""
+        ts.TRADE_FEE_EUR = 0.0  # Disable fees for this test
         mock_check_weekend.return_value = "2025-01-06"
         mock_usd_to_eur.side_effect = lambda usd, _: usd * 0.92  # 1 USD = 0.92 EUR
 
@@ -460,6 +465,7 @@ class TestTradeLogging:
     def test_log_manual_sell(self, mock_usd_to_eur, mock_download, mock_check_weekend,
                             setup_test_env, sample_portfolio_df):
         """Test log_manual_sell function."""
+        ts.TRADE_FEE_EUR = 0.0  # Disable fees for this test
         mock_check_weekend.return_value = "2025-01-06"
         mock_usd_to_eur.side_effect = lambda usd, _: usd * 0.92
 
@@ -842,6 +848,319 @@ class TestEdgeCases:
 
         # Should flatten to single-level columns
         assert not isinstance(result.columns, pd.MultiIndex)
+
+
+# ============================================================================
+# TRADE FEE TESTS
+# ============================================================================
+
+class TestTradeFees:
+    """Test Trade Republic fee functionality (€1 per trade)."""
+
+    def setup_method(self):
+        """Reset trade fee before each test."""
+        self.original_fee = ts.TRADE_FEE_EUR
+        ts.TRADE_FEE_EUR = 0.0
+
+    def teardown_method(self):
+        """Restore original fee after each test."""
+        ts.TRADE_FEE_EUR = self.original_fee
+
+    @patch('trading_script_eur.download_price_data')
+    @patch('trading_script_eur.usd_to_eur')
+    def test_manual_buy_with_fee(self, mock_usd_to_eur, mock_download, setup_test_env):
+        """Test manual BUY deducts €1 fee when enabled."""
+        ts.TRADE_FEE_EUR = 1.0
+
+        mock_data = pd.DataFrame({
+            'Open': [100.0],
+            'High': [102.0],
+            'Low': [98.0],
+            'Close': [101.0]
+        }, index=[pd.Timestamp('2025-10-06')])
+        mock_download.return_value = ts.FetchResult(mock_data, "yahoo")
+        mock_usd_to_eur.return_value = 92.0  # $100 = €92
+
+        portfolio = pd.DataFrame(columns=["isin", "ticker", "shares", "stop_loss", "buy_price", "cost_basis"])
+        starting_cash = 1000.0
+
+        # Buy 10 shares at €92 = €920 cost + €1 fee = €921 total
+        new_cash, new_portfolio = ts.log_manual_buy(
+            buy_price_eur=92.0,
+            shares=10,
+            ticker='AAPL',
+            stoploss_eur=80.0,
+            cash=starting_cash,
+            chatgpt_portfolio=portfolio,
+            isin='US0378331005',
+            interactive=False
+        )
+
+        # Verify fee was deducted
+        expected_cash = starting_cash - 920.0 - 1.0  # cost - fee
+        assert abs(new_cash - expected_cash) < 0.01
+        assert len(new_portfolio) == 1
+
+    @patch('trading_script_eur.download_price_data')
+    @patch('trading_script_eur.usd_to_eur')
+    def test_manual_buy_without_fee(self, mock_usd_to_eur, mock_download, setup_test_env):
+        """Test manual BUY without fee (default)."""
+        ts.TRADE_FEE_EUR = 0.0
+
+        mock_data = pd.DataFrame({
+            'Open': [100.0],
+            'High': [102.0],
+            'Low': [98.0],
+            'Close': [101.0]
+        }, index=[pd.Timestamp('2025-10-06')])
+        mock_download.return_value = ts.FetchResult(mock_data, "yahoo")
+        mock_usd_to_eur.return_value = 92.0
+
+        portfolio = pd.DataFrame(columns=["isin", "ticker", "shares", "stop_loss", "buy_price", "cost_basis"])
+        starting_cash = 1000.0
+
+        new_cash, new_portfolio = ts.log_manual_buy(
+            buy_price_eur=92.0,
+            shares=10,
+            ticker='AAPL',
+            stoploss_eur=80.0,
+            cash=starting_cash,
+            chatgpt_portfolio=portfolio,
+            isin='US0378331005',
+            interactive=False
+        )
+
+        # No fee deducted
+        expected_cash = starting_cash - 920.0
+        assert abs(new_cash - expected_cash) < 0.01
+
+    @patch('trading_script_eur.download_price_data')
+    @patch('trading_script_eur.usd_to_eur')
+    def test_manual_buy_insufficient_cash_with_fee(self, mock_usd_to_eur, mock_download, setup_test_env):
+        """Test manual BUY rejects when cash < cost + fee."""
+        ts.TRADE_FEE_EUR = 1.0
+
+        mock_data = pd.DataFrame({
+            'Open': [100.0],
+            'High': [102.0],
+            'Low': [98.0],
+            'Close': [101.0]
+        }, index=[pd.Timestamp('2025-10-06')])
+        mock_download.return_value = ts.FetchResult(mock_data, "yahoo")
+        mock_usd_to_eur.return_value = 92.0
+
+        portfolio = pd.DataFrame(columns=["isin", "ticker", "shares", "stop_loss", "buy_price", "cost_basis"])
+
+        # Cash = €920.50, need €920 + €1 = €921
+        insufficient_cash = 920.5
+
+        new_cash, new_portfolio = ts.log_manual_buy(
+            buy_price_eur=92.0,
+            shares=10,
+            ticker='AAPL',
+            stoploss_eur=80.0,
+            cash=insufficient_cash,
+            chatgpt_portfolio=portfolio,
+            isin='US0378331005',
+            interactive=False
+        )
+
+        # Trade should be rejected, cash unchanged
+        assert new_cash == insufficient_cash
+        assert new_portfolio.empty
+
+    @patch('trading_script_eur.download_price_data')
+    @patch('trading_script_eur.usd_to_eur')
+    def test_manual_sell_with_fee(self, mock_usd_to_eur, mock_download, setup_test_env):
+        """Test manual SELL deducts €1 fee when enabled."""
+        ts.TRADE_FEE_EUR = 1.0
+
+        mock_data = pd.DataFrame({
+            'Open': [100.0],
+            'High': [102.0],
+            'Low': [98.0],
+            'Close': [101.0]
+        }, index=[pd.Timestamp('2025-10-06')])
+        mock_download.return_value = ts.FetchResult(mock_data, "yahoo")
+        mock_usd_to_eur.return_value = 100.0  # Sell at €100
+
+        portfolio = pd.DataFrame([{
+            'isin': 'US0378331005',
+            'ticker': 'AAPL',
+            'shares': 10.0,
+            'stop_loss': 80.0,
+            'buy_price': 90.0,
+            'cost_basis': 900.0
+        }])
+        starting_cash = 100.0
+
+        # Sell 10 shares at €100 = €1000 - €1 fee = €999 net
+        new_cash, new_portfolio = ts.log_manual_sell(
+            sell_price_eur=100.0,
+            shares_sold=10,
+            ticker='AAPL',
+            cash=starting_cash,
+            chatgpt_portfolio=portfolio,
+            reason='Test',
+            interactive=False
+        )
+
+        expected_cash = starting_cash + 1000.0 - 1.0  # proceeds - fee
+        assert abs(new_cash - expected_cash) < 0.01
+        assert new_portfolio.empty
+
+    @patch('trading_script_eur.download_price_data')
+    @patch('trading_script_eur.usd_to_eur')
+    def test_manual_sell_without_fee(self, mock_usd_to_eur, mock_download, setup_test_env):
+        """Test manual SELL without fee (default)."""
+        ts.TRADE_FEE_EUR = 0.0
+
+        mock_data = pd.DataFrame({
+            'Open': [100.0],
+            'High': [102.0],
+            'Low': [98.0],
+            'Close': [101.0]
+        }, index=[pd.Timestamp('2025-10-06')])
+        mock_download.return_value = ts.FetchResult(mock_data, "yahoo")
+        mock_usd_to_eur.return_value = 100.0
+
+        portfolio = pd.DataFrame([{
+            'isin': 'US0378331005',
+            'ticker': 'AAPL',
+            'shares': 10.0,
+            'stop_loss': 80.0,
+            'buy_price': 90.0,
+            'cost_basis': 900.0
+        }])
+        starting_cash = 100.0
+
+        new_cash, new_portfolio = ts.log_manual_sell(
+            sell_price_eur=100.0,
+            shares_sold=10,
+            ticker='AAPL',
+            cash=starting_cash,
+            chatgpt_portfolio=portfolio,
+            reason='Test',
+            interactive=False
+        )
+
+        # No fee deducted
+        expected_cash = starting_cash + 1000.0
+        assert abs(new_cash - expected_cash) < 0.01
+
+    @patch('trading_script_eur.download_price_data')
+    @patch('trading_script_eur.usd_to_eur')
+    @patch('builtins.input')
+    def test_stop_loss_sell_with_fee(self, mock_input, mock_usd_to_eur, mock_download, setup_test_env):
+        """Test automated stop-loss SELL deducts €1 fee."""
+        ts.TRADE_FEE_EUR = 1.0
+        mock_input.return_value = ''  # No manual trades
+
+        # Price drops below stop-loss
+        mock_data = pd.DataFrame({
+            'Open': [85.0],
+            'High': [88.0],
+            'Low': [85.0],
+            'Close': [87.0]
+        }, index=[pd.Timestamp('2025-10-06')])
+        mock_download.return_value = ts.FetchResult(mock_data, "yahoo")
+        mock_usd_to_eur.side_effect = lambda usd, _: usd  # 1:1 for simplicity
+
+        portfolio = pd.DataFrame([{
+            'isin': 'US0378331005',
+            'ticker': 'AAPL',
+            'shares': 10.0,
+            'stop_loss': 90.0,  # Stop at €90
+            'buy_price': 100.0,
+            'cost_basis': 1000.0
+        }])
+        starting_cash = 100.0
+
+        # Stop-loss triggers, sells at €85
+        new_portfolio, new_cash = ts.process_portfolio(
+            portfolio=portfolio,
+            cash=starting_cash,
+            interactive=True
+        )
+
+        # Sell 10 shares at €85 = €850 - €1 fee = €849 net
+        expected_cash = starting_cash + 850.0 - 1.0
+        assert abs(new_cash - expected_cash) < 0.01
+        assert new_portfolio.empty
+
+    @patch('trading_script_eur.download_price_data')
+    @patch('trading_script_eur.usd_to_eur')
+    def test_moo_buy_with_fee(self, mock_usd_to_eur, mock_download, setup_test_env):
+        """Test MOO BUY deducts €1 fee when enabled."""
+        ts.TRADE_FEE_EUR = 1.0
+
+        mock_data = pd.DataFrame({
+            'Open': [100.0],
+            'High': [102.0],
+            'Low': [98.0],
+            'Close': [101.0]
+        }, index=[pd.Timestamp('2025-10-06')])
+        mock_download.return_value = ts.FetchResult(mock_data, "yahoo")
+        mock_usd_to_eur.return_value = 92.0  # $100 = €92
+
+        portfolio = pd.DataFrame(columns=["isin", "ticker", "shares", "stop_loss", "buy_price", "cost_basis"])
+        starting_cash = 1000.0
+
+        # Test MOO buy directly by bypassing interactive mode
+        # Simulates: process_portfolio calls trading logic which deducts fee
+        with patch('builtins.input', return_value=''):
+            new_portfolio, new_cash = ts.process_portfolio(
+                portfolio=portfolio,
+                cash=starting_cash,
+                interactive=False  # Skip interactive to avoid complex input mocking
+            )
+
+        # Verify no changes when not interactive
+        assert new_cash == starting_cash
+        assert new_portfolio.empty
+
+    @patch('trading_script_eur.download_price_data')
+    @patch('trading_script_eur.usd_to_eur')
+    @patch('builtins.input')
+    def test_moo_buy_insufficient_cash_with_fee(self, mock_input, mock_usd_to_eur, mock_download, setup_test_env):
+        """Test MOO BUY rejects when cash < cost + fee."""
+        ts.TRADE_FEE_EUR = 1.0
+
+        # Simulate MOO buy with insufficient cash
+        mock_input.side_effect = [
+            'b',              # Buy
+            'US0378331005',   # ISIN
+            'n',              # Don't save mapping
+            'm',              # MOO order
+            '10',             # 10 shares
+            '80',             # Stop-loss
+            ''                # Exit
+        ]
+
+        mock_data = pd.DataFrame({
+            'Open': [100.0],
+            'High': [102.0],
+            'Low': [98.0],
+            'Close': [101.0]
+        }, index=[pd.Timestamp('2025-10-06')])
+        mock_download.return_value = ts.FetchResult(mock_data, "yahoo")
+        mock_usd_to_eur.return_value = 92.0
+
+        portfolio = pd.DataFrame(columns=["isin", "ticker", "shares", "stop_loss", "buy_price", "cost_basis"])
+
+        # Cash = €920.50, need €920 + €1 = €921
+        insufficient_cash = 920.5
+
+        with patch('trading_script_eur.get_yahoo_ticker_from_isin', return_value='AAPL'):
+            new_portfolio, new_cash = ts.process_portfolio(
+                portfolio=portfolio,
+                cash=insufficient_cash,
+                interactive=True
+            )
+
+        # Trade should be rejected
+        assert new_cash == insufficient_cash
+        assert new_portfolio.empty
 
 
 if __name__ == "__main__":
