@@ -117,30 +117,69 @@ def get_usd_eur_rate(date: pd.Timestamp | None = None) -> float:
     try:
         # Fetch EUR/USD rate from Yahoo Finance
         logger.info("Fetching USD/EUR exchange rate for %s", date_str)
+        print("Fetching USD/EUR exchange rate for", date_str)
         start = date - pd.Timedelta(days=1)  # Look back a day to ensure we get data
         end = date + pd.Timedelta(days=1)
 
         fx_data = yf.download(FX_PAIR, start=start, end=end, progress=False)
 
         if fx_data.empty:
-            logger.warning("No FX data available for %s, using default rate 0.92", date_str)
-            return 0.92  # Fallback rate if no data
+            logger.warning("No FX data available for %s", date_str)
+            print(f"\n⚠️  No FX data available for {date_str}")
+            print("Please provide the EUR/USD exchange rate manually.")
+            print("(You can find current rates at: https://www.google.com/search?q=eur+to+usd)")
+
+            while True:
+                try:
+                    eur_usd_input = input(f"Enter EUR/USD rate for {date_str} (e.g., 1.08): ").strip()
+                    eur_usd_rate = float(eur_usd_input)
+                    if eur_usd_rate <= 0:
+                        print("❌ Rate must be positive. Please try again.")
+                        continue
+                    usd_eur_rate = 1.0 / eur_usd_rate
+                    _FX_CACHE[date_str] = usd_eur_rate
+                    print(f"✓ Using EUR/USD rate: {eur_usd_rate:.4f} (USD/EUR: {usd_eur_rate:.4f})")
+                    logger.info("Manual EUR/USD rate: %.4f, USD/EUR rate: %.4f", eur_usd_rate, usd_eur_rate)
+                    return usd_eur_rate
+                except ValueError:
+                    print("❌ Invalid input. Please enter a numeric value (e.g., 1.08)")
 
         # Get the close price for the date (EUR/USD rate)
+        
+        print("fx_data:", fx_data)
         eur_usd_rate = float(fx_data['Close'].iloc[-1])
         logger.info("Fetched EUR/USD rate for %s: %.4f", date_str, eur_usd_rate)
+        print(f"Fetched EUR/USD rate for {date_str}: {eur_usd_rate:.4f}")
 
         # Convert to USD/EUR rate (inverse)
         usd_eur_rate = 1.0 / eur_usd_rate
 
         _FX_CACHE[date_str] = usd_eur_rate
         logger.info("EUR/USD rate: %.4f, USD/EUR rate: %.4f", eur_usd_rate, usd_eur_rate)
+        print(f"EUR/USD rate: {eur_usd_rate:.4f}, USD/EUR rate: {usd_eur_rate:.4f}")
 
         return usd_eur_rate
 
     except Exception as e:
-        logger.error("Failed to fetch FX rate: %s. Using default rate 0.92", e)
-        return 0.92  # Approximate fallback rate
+        logger.error("Failed to fetch FX rate: %s", e)
+        print(f"\n⚠️  Error fetching FX rate: {e}")
+        print("Please provide the EUR/USD exchange rate manually.")
+        print("(You can find current rates at: https://www.google.com/search?q=eur+to+usd)")
+
+        while True:
+            try:
+                eur_usd_input = input(f"Enter EUR/USD rate for {date_str} (e.g., 1.08): ").strip()
+                eur_usd_rate = float(eur_usd_input)
+                if eur_usd_rate <= 0:
+                    print("❌ Rate must be positive. Please try again.")
+                    continue
+                usd_eur_rate = 1.0 / eur_usd_rate
+                _FX_CACHE[date_str] = usd_eur_rate
+                print(f"✓ Using EUR/USD rate: {eur_usd_rate:.4f} (USD/EUR: {usd_eur_rate:.4f})")
+                logger.info("Manual EUR/USD rate: %.4f, USD/EUR rate: %.4f", eur_usd_rate, usd_eur_rate)
+                return usd_eur_rate
+            except ValueError:
+                print("❌ Invalid input. Please enter a numeric value (e.g., 0.92)")
 
 def usd_to_eur(usd_amount: float, date: pd.Timestamp | None = None) -> float:
     """Convert USD amount to EUR using the exchange rate for the given date."""
