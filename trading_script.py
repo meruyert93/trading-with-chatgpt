@@ -614,6 +614,7 @@ Would you like to log a manual trade? Enter 'b' for buy, 's' for sell, or press 
 
                     log = {
                         "Date": today_iso,
+                        "ISIN": isin,
                         "Ticker": ticker,
                         "Shares Bought": shares,
                         "Buy Price": exec_price,
@@ -721,9 +722,9 @@ Would you like to log a manual trade? Enter 'b' for buy, 's' for sell, or press 
 
         fetch = download_price_data(ticker, start=s, end=e, auto_adjust=False, progress=False)
         data = fetch.df
-        
-        # Get ISIN from stock dict
-        isin_value = stock.get("isin", "") if isinstance(stock, dict) else ""
+
+        # Get ISIN from stock row (works for both dict and Series)
+        isin_value = str(stock.get("isin", "")) if hasattr(stock, 'get') else (str(stock["isin"]) if "isin" in stock.index else "")
 
         if data.empty:
             print(f"No data for {ticker} (source={fetch.source}).")
@@ -749,9 +750,9 @@ Would you like to log a manual trade? Enter 'b' for buy, 's' for sell, or press 
             pnl = round((exec_price - cost) * shares, 2)
             action = "SELL - Stop Loss Triggered"
             cash += value
-            portfolio_df = log_sell(ticker, shares, exec_price, cost, pnl, portfolio_df)
+            portfolio_df = log_sell(ticker, shares, exec_price, cost, pnl, portfolio_df, isin=isin_value)
             row = {
-                "Date": today_iso, "Ticker": ticker, "Shares": shares,
+                "Date": today_iso, "ISIN": isin_value, "Ticker": ticker, "Shares": shares,
                 "Buy Price": cost, "Cost Basis": cost_basis, "Stop Loss": stop,
                 "Current Price": exec_price, "Total Value": value, "PnL": pnl,
                 "Action": action, "Cash Balance": "", "Total Equity": "",
@@ -763,9 +764,8 @@ Would you like to log a manual trade? Enter 'b' for buy, 's' for sell, or press 
             action = "HOLD"
             total_value += value
             total_pnl += pnl
-            isin_value = str(stock.get("isin", "")) if hasattr(stock, 'get') else ""
             row = {
-                "Date": today_iso, "ISIN": isin_value, "Ticker": ticker, "Shares": shares, 
+                "Date": today_iso, "ISIN": isin_value, "Ticker": ticker, "Shares": shares,
                 "Buy Price": cost, "Cost Basis": cost_basis, "Stop Loss": stop,
                 "Current Price": price, "Total Value": value, "PnL": pnl,
                 "Action": action, "Cash Balance": "", "Total Equity": "",
@@ -883,7 +883,7 @@ def log_manual_buy(
 
     if not isinstance(chatgpt_portfolio, pd.DataFrame) or chatgpt_portfolio.empty:
         chatgpt_portfolio = pd.DataFrame(
-            columns=["ticker", "shares", "stop_loss", "buy_price", "cost_basis"]
+            columns=["isin", "ticker", "shares", "stop_loss", "buy_price", "cost_basis"]
         )
 
     s, e = trading_day_window()
@@ -914,6 +914,7 @@ def log_manual_buy(
 
     log = {
         "Date": today,
+        "ISIN": isin or "",
         "Ticker": ticker,
         "Shares Bought": shares,
         "Buy Price": exec_price,
@@ -1030,8 +1031,11 @@ If this is a mistake, enter 1, or hit Enter."""
     cost_basis = buy_price * shares_sold
     pnl = exec_price * shares_sold - cost_basis
 
+    # Get ISIN from portfolio if it exists
+    isin_value = str(ticker_row["isin"].item()) if "isin" in ticker_row.columns else ""
+
     log = {
-        "Date": today, "Ticker": ticker,
+        "Date": today, "ISIN": isin_value, "Ticker": ticker,
         "Shares Bought": "", "Buy Price": "",
         "Cost Basis": cost_basis, "PnL": pnl,
         "Reason": f"MANUAL SELL LIMIT - {reason}", "Shares Sold": shares_sold,
@@ -1338,7 +1342,7 @@ def load_latest_portfolio_state(
 
     logger.info("Successfully read CSV file: %s", PORTFOLIO_CSV)
     if df.empty:
-        portfolio = pd.DataFrame(columns=["ticker", "shares", "stop_loss", "buy_price", "cost_basis"])
+        portfolio = pd.DataFrame(columns=["isin", "ticker", "shares", "stop_loss", "buy_price", "cost_basis"])
         print("Portfolio CSV is empty. Returning set amount of cash for creating portfolio.")
          
          
