@@ -144,10 +144,10 @@ def get_usd_eur_rate(date: pd.Timestamp | None = None) -> float:
                 except ValueError:
                     print("❌ Invalid input. Please enter a numeric value (e.g., 1.08)")
 
-        # Get the close price for the date (EUR/USD rate)
-        
+        # Get the open price for the date (EUR/USD rate at market open)
+
         print("fx_data:", fx_data)
-        eur_usd_rate = float(fx_data['Close'].iloc[-1])
+        eur_usd_rate = float(fx_data['Open'].iloc[-1])
         logger.info("Fetched EUR/USD rate for %s: %.4f", date_str, eur_usd_rate)
         print(f"Fetched EUR/USD rate for {date_str}: {eur_usd_rate:.4f}")
 
