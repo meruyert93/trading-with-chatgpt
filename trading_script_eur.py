@@ -852,20 +852,64 @@ def process_portfolio(
         c_eur = usd_to_eur(c_usd, today_ts)
 
         if stop_eur and l_eur <= stop_eur:
-            exec_price = round(o_eur if o_eur <= stop_eur else stop_eur, 2)
-            value = round(exec_price * shares, 2)
-            pnl = round((exec_price - cost_eur) * shares, 2)
-            action = "SELL - Stop Loss Triggered"
-            cash += value - TRADE_FEE_EUR
-            if TRADE_FEE_EUR > 0:
-                print(f"Stop-loss triggered for {ticker}. Trade fee deducted: {CURRENCY_SYMBOL}{TRADE_FEE_EUR:.2f}")
-            portfolio_df = log_sell(ticker, shares, exec_price, cost_eur, pnl, portfolio_df, isin=isin_value)
-            row = {
-                "Date": today_iso, "ISIN": isin_value, "Ticker": ticker, "Shares": shares,
-                "Buy Price": cost_eur, "Cost Basis": cost_basis, "Stop Loss": stop_eur,
-                "Current Price": exec_price, "Total Value": value, "PnL": pnl,
-                "Action": action, "Cash Balance": "", "Total Equity": "",
-            }
+            print(f"\nStop loss potentially triggered for {ticker}:")
+            print(f"  Stop loss price: €{stop_eur:.2f} EUR")
+            print(f"  Today's low: €{l_eur:.2f} EUR")
+            was_sold = input(f"Was this position actually sold? (y/n): ").strip().lower()
+
+            if was_sold == 'y':
+                # Position was sold
+                exec_price = round(o_eur if o_eur <= stop_eur else stop_eur, 2)
+                print(f"Calculated execution price: €{exec_price:.2f} EUR")
+                custom_price = input(f"Enter actual sell price in EUR (press Enter to use €{exec_price:.2f}): ").strip()
+
+                if custom_price:
+                    try:
+                        exec_price = round(float(custom_price), 2)
+                        print(f"Using your price: €{exec_price:.2f} EUR")
+                    except ValueError:
+                        print(f"Invalid input. Using calculated price: €{exec_price:.2f} EUR")
+
+                value = round(exec_price * shares, 2)
+                pnl = round((exec_price - cost_eur) * shares, 2)
+                action = "SELL - Stop Loss Triggered"
+                cash += value - TRADE_FEE_EUR
+                if TRADE_FEE_EUR > 0:
+                    print(f"Stop-loss triggered for {ticker}. Trade fee deducted: {CURRENCY_SYMBOL}{TRADE_FEE_EUR:.2f}")
+                portfolio_df = log_sell(ticker, shares, exec_price, cost_eur, pnl, portfolio_df, isin=isin_value)
+                row = {
+                    "Date": today_iso, "ISIN": isin_value, "Ticker": ticker, "Shares": shares,
+                    "Buy Price": cost_eur, "Cost Basis": cost_basis, "Stop Loss": stop_eur,
+                    "Current Price": exec_price, "Total Value": value, "PnL": pnl,
+                    "Action": action, "Cash Balance": "", "Total Equity": "",
+                }
+            else:
+                # Not sold, holding - but ask for current price confirmation
+                print(f"Current close price: €{c_eur:.2f} EUR")
+                custom_price = input(f"Enter actual current price in EUR (press Enter to use €{c_eur:.2f}): ").strip()
+
+                price = c_eur
+                if custom_price:
+                    try:
+                        price = round(float(custom_price), 2)
+                        print(f"Using your price: €{price:.2f} EUR")
+                    except ValueError:
+                        print(f"Invalid input. Using close price: €{price:.2f} EUR")
+                        price = round(c_eur, 2)
+                else:
+                    price = round(c_eur, 2)
+
+                value = round(price * shares, 2)
+                pnl = round((price - cost_eur) * shares, 2)
+                action = "HOLD"
+                total_value += value
+                total_pnl += pnl
+                row = {
+                    "Date": today_iso, "ISIN": isin_value, "Ticker": ticker, "Shares": shares,
+                    "Buy Price": cost_eur, "Cost Basis": cost_basis, "Stop Loss": stop_eur,
+                    "Current Price": price, "Total Value": value, "PnL": pnl,
+                    "Action": action, "Cash Balance": "", "Total Equity": "",
+                }
         else:
             price = round(c_eur, 2)
             value = round(price * shares, 2)
@@ -1006,8 +1050,15 @@ def log_manual_buy(
         # Calculate equivalent USD price
         exec_price_usd = buy_price_eur / usd_to_eur(1.0, today_ts)
     else:
-        print(f"Buy limit €{buy_price_eur:.2f} EUR for {ticker} not reached today (range €{l_eur:.2f}-€{h_eur:.2f} EUR). Order not filled.")
-        return cash, chatgpt_portfolio
+        print(f"Buy limit €{buy_price_eur:.2f} EUR for {ticker} not reached today (range €{l_eur:.2f}-€{h_eur:.2f} EUR).")
+        override = input(f"Do you want to fill the order at your limit price €{buy_price_eur:.2f} EUR anyway? (y/n): ").strip().lower()
+        if override == 'y':
+            exec_price_eur = buy_price_eur
+            exec_price_usd = buy_price_eur / usd_to_eur(1.0, today_ts)
+            print(f"Order filled at your limit price €{buy_price_eur:.2f} EUR")
+        else:
+            print("Order not filled.")
+            return cash, chatgpt_portfolio
 
     cost_amt = exec_price_eur * shares
     total_cost_with_fee = cost_amt + TRADE_FEE_EUR
